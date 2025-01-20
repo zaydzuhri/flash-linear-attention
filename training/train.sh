@@ -39,6 +39,7 @@ echo "rank:             ${rank:=}"
 echo "ip:               ${ip:=}"
 echo "port:             ${port:=}"
 echo "nodes:            ${nodes:=1}"
+echo "profile:          ${profile:=False}"
 
 params="--model_name_or_path $model \
     --tokenizer $tokenizer \
@@ -71,6 +72,7 @@ params="--model_name_or_path $model \
     --seed $seed \
     --logging_steps $logging \
     --push_to_hub $push \
+    --do_profiling $profile \
     --bf16"
 
 if [ $steps -gt 0 ]; then
@@ -85,6 +87,10 @@ if [ "$cache" != "" ]; then
 fi
 if [ "$checkpoint" != "" ]; then
   params+=" --resume_from_checkpoint $checkpoint"
+fi
+if [ "$profile" == "True" ]; then
+  WANDB_DISABLED="false"
+  params+=" --report_to none"
 fi
 if [ "$WANDB_DISABLED" != "true" ]; then
   params+=" --report_to wandb \

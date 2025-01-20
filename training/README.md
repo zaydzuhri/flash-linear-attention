@@ -100,6 +100,27 @@ bash train.sh \
   cache=data/alturing/gutenberg-texts/train
 ```
 
+or if you want to profile:
+```bash
+bash train.sh \
+  type=scan \
+  lr=3e-4 \
+  steps=1000 \
+  batch=2 \
+  update=1 \
+  warmup=100 \
+  context=2048 \
+  workers=2 \
+  Preprocessing=2 \
+  path=exp/scan-340M-test \
+  project=fla \
+  model=configs/scan_340M.json \
+  data=alturing/gutenberg-texts \
+  name=sample-10BT \
+  cache=data/alturing/gutenberg-texts/train \
+  profile=True 
+```
+
 `flame` also supports resuming interrupted training by specifying the checkpoint path. 
 Simply use the following command to resume training:
 

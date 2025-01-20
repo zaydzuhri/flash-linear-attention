@@ -5,6 +5,7 @@
   "eos_token_id": 2,
   "expand_k": 1,
   "expand_v": 1,
+  "cut_cross_entropy" : false,
   "fuse_cross_entropy": true,
   "fuse_norm": true,
   "hidden_act": "swish",

@@ -24,6 +24,11 @@ from fla.modules import (FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss,
                          RMSNorm)
 from fla.modules.activations import swiglu_linear
 from fla.modules.layernorm import rms_norm_linear
+try:
+    from cut_cross_entropy import linear_cross_entropy, LinearCrossEntropyImpl
+    HAS_CCE = True
+except:
+    HAS_CCE = False
 
 logger = logging.get_logger(__name__)
 
@@ -304,6 +309,9 @@ class SCANForCausalLM(SCANPreTrainedModel, GenerationMixin):
         self.model = SCANModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.vocab_size_small = self.vocab_size <= 32_000
+        if HAS_CCE:
+            self.impl = LinearCrossEntropyImpl.TORCH_COMPILE if self.vocab_size_small else LinearCrossEntropyImpl.CCE
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -406,28 +414,37 @@ class SCANForCausalLM(SCANPreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
+        fuse_linear_and_cross_entropy = (self.config.fuse_cross_entropy or self.config.cut_cross_entropy) and self.training
         logits = None if fuse_linear_and_cross_entropy else self.lm_head(hidden_states[:, -num_logits_to_keep:])
 
         loss = None
         if labels is not None:
-            if self.config.fuse_cross_entropy:
-                if fuse_linear_and_cross_entropy:
-                    loss_fct = FusedLinearCrossEntropyLoss()
-                else:
-                    loss_fct = FusedCrossEntropyLoss(inplace_backward=True)
-            else:
-                loss_fct = nn.CrossEntropyLoss()
-            # Enable model parallelism
             labels = labels.to(hidden_states.device)
-            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], loss_fct.ignore_index)), 1)
-            if fuse_linear_and_cross_entropy:
-                loss = loss_fct(hidden_states.view(-1, self.config.hidden_size),
-                                labels.view(-1),
-                                self.lm_head.weight,
-                                self.lm_head.bias)
+            if self.config.cut_cross_entropy:
+                loss = linear_cross_entropy(
+                    hidden_states,
+                    self.lm_head.weight,
+                    labels,
+                    shift= True, 
+                    impl=self.impl
+                )
             else:
-                loss = loss_fct(logits.view(-1, self.config.vocab_size), labels.view(-1))
+                if self.config.fuse_cross_entropy:
+                    if fuse_linear_and_cross_entropy:
+                        loss_fct = FusedLinearCrossEntropyLoss()
+                    else:
+                        loss_fct = FusedCrossEntropyLoss(inplace_backward=True)
+                else:
+                    loss_fct = nn.CrossEntropyLoss()
+                # Enable model parallelism
+                labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], loss_fct.ignore_index)), 1)
+                if fuse_linear_and_cross_entropy:
+                    loss = loss_fct(hidden_states.view(-1, self.config.hidden_size),
+                                    labels.view(-1),
+                                    self.lm_head.weight,
+                                    self.lm_head.bias)
+                else:
+                    loss = loss_fct(logits.view(-1, self.config.vocab_size), labels.view(-1))
 
         if not return_dict:
             output = (logits,) + outputs[1:]

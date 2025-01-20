@@ -42,6 +42,7 @@ class SCANConfig(PretrainedConfig):
         tie_word_embeddings: bool = False,
         fuse_norm: bool = True,
         fuse_cross_entropy: bool = True,
+        cut_cross_entropy: bool = True,
         vocab_size: int = 32000,
         **kwargs
     ):
@@ -70,6 +71,7 @@ class SCANConfig(PretrainedConfig):
         self.use_cache = use_cache
         self.initializer_range = initializer_range
         self.fuse_cross_entropy = fuse_cross_entropy
+        self.cut_cross_entropy = cut_cross_entropy
         self.fuse_norm = fuse_norm
         self.vocab_size = vocab_size
 

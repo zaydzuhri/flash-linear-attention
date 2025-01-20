@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import torch
 from datasets import load_from_disk
 from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
                           Trainer)
@@ -34,6 +35,12 @@ def main():
         model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path)
     model.train()
 
+    if getattr(model.config, "cut_cross_entropy", False):
+        try:
+            from cut_cross_entropy import linear_cross_entropy
+        except ImportError as e:
+            raise ImportError(f"You use `cut_cross_entropy` but you did not have CCE. Install it first!: {e}")
+
     trainable_params, all_param = model.num_parameters(only_trainable=True), model.num_parameters()
     logger.info(f"% of trainable params: {trainable_params:d} / {all_param:d} = {trainable_params / all_param:.2%}")
     logger.info(f"{tokenizer}\n{model}\n{model.config}")
@@ -53,6 +60,9 @@ def main():
             'num_decay_steps': args.max_steps * 0.1
         }
 
+
+    # model = torch.compile(model)
+
     trainer = Trainer(
         model=model,
         args=args,
@@ -62,13 +72,34 @@ def main():
         train_dataset=dataset
     )
 
+    if args.do_profiling:
+        from edd_utils import ProfCallback
+
+        profiling_output_dir = f"profiler_output_{args.output_dir}"
+
+        callback = ProfCallback(
+            cpu=True,
+            cuda=True,
+            output_dir=profiling_output_dir
+        )
+
+        new_max_steps = (callback.active_steps + callback.warmup_steps + callback.wait_steps) * (callback.repeat + 1) + 2
+        print("Do profiling is activated, therefore we should reduce the amount of steps ", 
+              f"to {new_max_steps}")
+        print(f"We will save the profiling outputs to {profiling_output_dir}")
+
+        args.max_steps = new_max_steps
+
+        trainer.add_callback(callback)
+
     results = trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
     trainer.save_model()
     tokenizer.save_pretrained(trainer.args.output_dir)
 
-    trainer.log_metrics("train", results.metrics)
-    trainer.save_metrics("train", results.metrics)
-    trainer.save_state()
+    if not args.do_profiling:
+        trainer.log_metrics("train", results.metrics)
+        trainer.save_metrics("train", results.metrics)
+        trainer.save_state()
 
 
 if __name__ == "__main__":

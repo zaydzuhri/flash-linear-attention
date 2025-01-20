@@ -70,7 +70,27 @@ class TrainingArguments(TrainingArguments):
         default=2048,
         metadata={"help": "The context length of the tokenized inputs in the dataset."},
     )
-
+    do_profiling: bool = field(
+        default=False,
+        metadata={"help" : "Whether we want to do profiling or not"}
+    )
+    wait_steps: Optional[int] = field(
+        default=None,
+        metadata={"help" : "Amount of wait steps before we do the profiling"}
+    )
+    warmup_steps: Optional[int] = field(
+        default=None,
+        metadata={"help" : "Amount of warmup steps before we do the profiling"}
+    )
+    active_steps: Optional[int] = field(
+        default=None,
+        metadata={"help" : "Amount of active steps before we do the profiling"}
+    )
+    num_cycles: Optional[int] = field(
+        default=None,
+        metadata={"help" : "Amount of cycles before we do the profiling"}
+    )
+    
 
 def get_train_args():
     parser = HfArgumentParser(TrainingArguments)
