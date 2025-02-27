@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from fla.layers import (ABCAttention, Attention, BasedLinearAttention,
-                        BitAttention, DeltaNet, GatedDeltaNet,
+                        BitAttention, DeltaNet, DualSlidingWindowAttention, GatedDeltaNet,
                         GatedLinearAttention, GatedSlotAttention,
                         HGRN2Attention, HGRNAttention, LightNetAttention,
                         LinearAttention, MultiScaleRetention,
@@ -15,7 +15,8 @@ from fla.models import (ABCForCausalLM, ABCModel, BitNetForCausalLM,
                         LinearAttentionForCausalLM, LinearAttentionModel,
                         RetNetForCausalLM, RetNetModel, RWKV6ForCausalLM,
                         RWKV6Model, RWKV7ForCausalLM, RWKV7Model,
-                        TransformerForCausalLM, TransformerModel)
+                        TransformerForCausalLM, TransformerModel,
+                        WambaForCausalLM, WambaModel)
 
 __all__ = [
     'ABCAttention',
@@ -23,6 +24,7 @@ __all__ = [
     'BasedLinearAttention',
     'BitAttention',
     'DeltaNet',
+    'DualSlidingWindowAttention',
     'GatedDeltaNet',
     'HGRNAttention',
     'HGRN2Attention',
@@ -62,6 +64,8 @@ __all__ = [
     'RWKV7Model',
     'TransformerForCausalLM',
     'TransformerModel'
+    'WambaForCausalLM',
+    'WambaModel',
 ]
 
 __version__ = '0.1'

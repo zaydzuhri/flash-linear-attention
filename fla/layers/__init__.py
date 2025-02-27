@@ -5,6 +5,7 @@ from .attn import Attention
 from .based import BasedLinearAttention
 from .bitattn import BitAttention
 from .delta_net import DeltaNet
+from .dswattn import DualSlidingWindowAttention
 from .gated_deltanet import GatedDeltaNet
 from .gla import GatedLinearAttention
 from .gsa import GatedSlotAttention
@@ -23,6 +24,7 @@ __all__ = [
     'BasedLinearAttention',
     'BitAttention',
     'DeltaNet',
+    'DualSlidingWindowAttention',
     'GatedDeltaNet',
     'GatedLinearAttention',
     'GatedSlotAttention',
