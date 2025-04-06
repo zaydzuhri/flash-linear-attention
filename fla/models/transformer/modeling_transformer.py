@@ -47,7 +47,8 @@ class TransformerBlock(nn.Module):
             window_size=config.window_size,
             rope_theta=config.rope_theta,
             max_position_embeddings=config.max_position_embeddings,
-            layer_idx=layer_idx
+            layer_idx=layer_idx,
+            attn_impl=config.attn_impl
         )
 
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)

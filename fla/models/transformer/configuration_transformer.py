@@ -36,6 +36,7 @@ class TransformerConfig(PretrainedConfig):
         fuse_swiglu: bool = True,
         fuse_cross_entropy: bool = True,
         vocab_size: int = 32000,
+        attn_impl: str = "flash_attn", # {flash_attn, parallel_attn, parallel_rectified_attn}, parallel_attn and parallel_rectified_attn are the fla.ops implementations which don't support inference
         **kwargs,
     ):
         self.hidden_size = hidden_size
@@ -61,6 +62,8 @@ class TransformerConfig(PretrainedConfig):
         self.fuse_swiglu = fuse_swiglu
         self.fuse_cross_entropy = fuse_cross_entropy
         self.vocab_size = vocab_size
+
+        self.attn_impl = attn_impl
 
         super().__init__(
             pad_token_id=pad_token_id,

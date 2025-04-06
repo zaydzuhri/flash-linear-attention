@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from .abc import chunk_abc
-from .attn import parallel_attn
+from .attn import parallel_attn, parallel_rectified_attn
 from .based import fused_chunk_based, parallel_based
 from .delta_rule import chunk_delta_rule, fused_chunk_delta_rule, fused_recurrent_delta_rule
 from .forgetting_attn import parallel_forgetting_attn
@@ -25,7 +25,7 @@ from .simple_gla import chunk_simple_gla, fused_recurrent_simple_gla, parallel_s
 
 __all__ = [
     'chunk_abc',
-    'parallel_attn',
+    'parallel_attn', 'parallel_rectified_attn',
     'fused_chunk_based', 'parallel_based',
     'chunk_delta_rule', 'fused_chunk_delta_rule', 'fused_recurrent_delta_rule',
     'parallel_forgetting_attn',
