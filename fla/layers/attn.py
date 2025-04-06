@@ -173,7 +173,7 @@ class Attention(nn.Module):
         elif self.attn_impl == "parallel_attn":
             o = parallel_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
         elif self.attn_impl == "parallel_rectified_attn":
-            o = parallel_rectified_attn(q, k, v, scale=self.head_dim* -0.5, cu_seqlens=cu_seqlens)
+            o = parallel_rectified_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
         else:
             raise ValueError(f"Unknown attention implementation: {self.attn_impl}")
 
