@@ -347,7 +347,6 @@ def parallel_rect_attn_bwd_kernel_dkv(
         b_delta = tl.load(p_delta, boundary_check=(0,))
         # [BT, BS]
         b_s = tl.dot(b_k, tl.trans(b_q))
-        b_p = exp(b_s - b_lse[None, :])
         # b_p = exp(b_s - b_lse[None, :])
         # b_p = exp(tl.where(b_s < 0, float('-inf'), b_s - b_lse[None, :]))
         b_p = tl.where(b_s < 0, 0.0, exp(b_s - b_lse[None, :]))
