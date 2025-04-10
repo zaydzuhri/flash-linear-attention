@@ -10,14 +10,14 @@ def naive_rectified_attn(
     cu_seqlens: Optional[torch.LongTensor] = None,
     head_first: bool = False
 ) -> torch.Tensor:
-    q_len = q.shape[-2]
-    k_len = k.shape[-2]
-    head_dim = q.shape[-1]
-    mask = torch.tril(torch.ones(k_len, k_len, device=q.device))
     if scale is None:
         scale = 1.0 / (head_dim ** 0.5)
     if not head_first:
         q, k, v = map(lambda x: rearrange(x, 'b t h d -> b h t d'), (q, k, v))
+    q_len = q.shape[-2]
+    k_len = k.shape[-2]
+    head_dim = q.shape[-1]
+    mask = torch.tril(torch.ones(k_len, k_len, device=q.device))
     wei = torch.matmul(q, k.transpose(2, 3)) # shape: (batch_size, num_heads, q_len, k_len)
     wei = wei * scale
     wei = torch.where(wei >= 0, wei, float('-inf'))
