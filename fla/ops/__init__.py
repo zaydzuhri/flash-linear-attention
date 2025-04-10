@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from .abc import chunk_abc
-from .attn import parallel_attn, parallel_rectified_attn
+from .attn import parallel_attn, parallel_rectified_attn, naive_attn, naive_rectified_attn
 from .based import fused_chunk_based, parallel_based
 from .delta_rule import chunk_delta_rule, fused_chunk_delta_rule, fused_recurrent_delta_rule
 from .forgetting_attn import parallel_forgetting_attn

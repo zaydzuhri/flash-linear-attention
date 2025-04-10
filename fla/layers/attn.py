@@ -14,7 +14,7 @@ from einops import rearrange
 from transformers.utils import logging
 
 from fla.modules import RMSNorm, RotaryEmbedding
-from fla.ops import parallel_attn, parallel_rectified_attn
+from fla.ops import parallel_attn, parallel_rectified_attn, naive_attn, naive_rectified_attn
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
@@ -174,6 +174,10 @@ class Attention(nn.Module):
             o = parallel_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
         elif self.attn_impl == "parallel_rectified_attn":
             o = parallel_rectified_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "naive_attn":
+            o = naive_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "naive_rectified_attn":
+            o = naive_rectified_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
         else:
             raise ValueError(f"Unknown attention implementation: {self.attn_impl}")
 
