@@ -144,8 +144,8 @@ class Attention(nn.Module):
                 k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
                 v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
 
-        if flash_attn_func is None:
-            raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")
+        # if flash_attn_func is None:
+        #     raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")
 
         if "scaled" in self.attn_impl:
             k_len = k.shape[1]
