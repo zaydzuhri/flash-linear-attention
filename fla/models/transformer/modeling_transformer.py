@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.utils.checkpoint
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
@@ -27,6 +28,55 @@ if TYPE_CHECKING:
 
 
 logger = logging.get_logger(__name__)
+
+def seq_to_myopic(seq, vocab_size, gamma=0.75):
+    """
+    Convert batch of token sequences to batch of sequences of token discount bags.
+    Each token's value is gamma^d, where d is the distance to the first occurrence of the token from position t.
+    If the token does not occur from t onwards, value is 0.
+    
+    Args:
+        seq (Tensor): (B, T) tensor of token indices.
+        vocab_size (int): Size of the vocabulary.
+        gamma (float): Discount factor per step.
+        
+    Returns:
+        Tensor: (B, T, V) tensor of discount values.
+    """
+    B, T = seq.shape
+    device = seq.device
+    T_val = T  # Used as the 'infinity' value for non-occurrences
+    
+    # One-hot encode the sequence: (B, T, V)
+    one_hot = F.one_hot(seq, num_classes=vocab_size).long()
+    
+    # Create position indices: (1, T, 1) -> (B, T, V) via broadcasting
+    positions = torch.arange(T, device=device).view(1, T, 1)
+    
+    # Create occurrence indices tensor, T_val represents no occurrence
+    occurrence_indices = torch.where(one_hot.bool(), positions.expand(B, T, vocab_size), T_val)
+    
+    # Reverse along the time dimension to compute cumulative min from the end
+    reversed_occurrence = torch.flip(occurrence_indices, dims=[1])
+    
+    # Compute cumulative minimum along the time dimension (after reversal)
+    cum_min = torch.zeros_like(reversed_occurrence)
+    cum_min[:, 0, :] = reversed_occurrence[:, 0, :]
+    for i in range(1, T):
+        cum_min[:, i, :] = torch.min(cum_min[:, i-1, :], reversed_occurrence[:, i, :])
+    
+    # Reverse back to get the next occurrence positions
+    next_occurrence = torch.flip(cum_min, dims=[1])
+    
+    # Calculate distance from current position t
+    t_positions = positions.expand(B, T, vocab_size)  # (B, T, V)
+    distance = next_occurrence - t_positions
+    
+    # Compute discount: gamma^distance where next_occurrence is valid, else 0
+    mask = next_occurrence != T_val
+    discount = torch.where(mask, gamma ** distance.float(), torch.tensor(0.0, device=device))
+    
+    return discount
 
 
 class TransformerBlock(nn.Module):
@@ -279,6 +329,9 @@ class TransformerForCausalLM(TransformerPreTrainedModel, GenerationMixin):
         self.model = TransformerModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        if config.use_myopic_loss:
+            self.myopic_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+            self.myopic_criterion = nn.BCEWithLogitsLoss()
         self.criterion = None
 
         # Initialize weights and apply final processing
@@ -391,6 +444,11 @@ class TransformerForCausalLM(TransformerPreTrainedModel, GenerationMixin):
                 loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
             else:
                 loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))
+
+            if self.config.use_myopic_loss:
+                myopic_labels = seq_to_myopic(labels, self.vocab_size, gamma=0.75)
+                myopic_logits = self.myopic_head(hidden_states)
+                loss += self.myopic_criterion(myopic_logits.view(-1, self.vocab_size), myopic_labels.view(-1, self.vocab_size))
 
         if not return_dict:
             output = (logits,) + outputs[1:]
