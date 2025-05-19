@@ -32,38 +32,39 @@ logger = logging.get_logger(__name__)
 def seq_to_myopic(seq, vocab_size, gamma=0.75):
     """
     Convert batch of token sequences to batch of sequences of token discount bags.
-    Each token's value is gamma^d, where d is the distance to the first occurrence of the token from position t.
-    If the token does not occur from t onwards, value is 0.
+    Handles OOV indices (like padding with -100) by zeroing their one-hot vectors.
     
     Args:
-        seq (Tensor): (B, T) tensor of token indices.
-        vocab_size (int): Size of the vocabulary.
-        gamma (float): Discount factor per step.
+        seq (Tensor): (B, T) tensor of token indices (may contain OOV/padding indices)
+        vocab_size (int): Size of the vocabulary
+        gamma (float): Discount factor per step
         
     Returns:
-        Tensor: (B, T, V) tensor of discount values.
+        Tensor: (B, T, V) tensor of discount values
     """
     B, T = seq.shape
     device = seq.device
     T_val = T  # Used as the 'infinity' value for non-occurrences
+
+    # Handle out-of-vocab indices (e.g., -100 for padding)
+    valid_mask = (seq >= 0) & (seq < vocab_size)
+    adjusted_seq = torch.masked_fill(seq, ~valid_mask, 0)  # Set OOV indices to 0
     
-    # One-hot encode the sequence: (B, T, V)
-    one_hot = F.one_hot(seq, num_classes=vocab_size).long()
-    
+    # Create masked one-hot encoding
+    one_hot = F.one_hot(adjusted_seq, num_classes=vocab_size).bool()
+    one_hot = one_hot & valid_mask.unsqueeze(-1)  # Zero out invalid entries
+
     # Create position indices: (1, T, 1) -> (B, T, V) via broadcasting
     positions = torch.arange(T, device=device).view(1, T, 1)
     
     # Create occurrence indices tensor, T_val represents no occurrence
-    occurrence_indices = torch.where(one_hot.bool(), positions.expand(B, T, vocab_size), T_val)
+    occurrence_indices = torch.where(one_hot, positions.expand(B, T, vocab_size), T_val)
     
-    # Reverse along the time dimension to compute cumulative min from the end
+    # Reverse along time dimension to compute cumulative min from the end
     reversed_occurrence = torch.flip(occurrence_indices, dims=[1])
     
     # Compute cumulative minimum along the time dimension (after reversal)
-    cum_min = torch.zeros_like(reversed_occurrence)
-    cum_min[:, 0, :] = reversed_occurrence[:, 0, :]
-    for i in range(1, T):
-        cum_min[:, i, :] = torch.min(cum_min[:, i-1, :], reversed_occurrence[:, i, :])
+    cum_min = torch.cummin(reversed_occurrence, dim=1)[0]  # (B, T, V)
     
     # Reverse back to get the next occurrence positions
     next_occurrence = torch.flip(cum_min, dims=[1])
