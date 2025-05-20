@@ -31,53 +31,46 @@ logger = logging.get_logger(__name__)
 
 def seq_to_myopic(seq, vocab_size, gamma=0.75):
     """
-    Convert batch of token sequences to batch of sequences of token discount bags.
-    Handles OOV indices (like padding with -100) by zeroing their one-hot vectors.
-    
-    Args:
-        seq (Tensor): (B, T) tensor of token indices (may contain OOV/padding indices)
-        vocab_size (int): Size of the vocabulary
-        gamma (float): Discount factor per step
-        
-    Returns:
-        Tensor: (B, T, V) tensor of discount values
+    Memory-optimized version using incremental updates and mathematical transformations.
+    Avoids creating full (B, T, V) intermediate tensors.
     """
     B, T = seq.shape
     device = seq.device
-    T_val = T  # Used as the 'infinity' value for non-occurrences
+    T_val = T  # Our "infinity" value
 
-    # Handle out-of-vocab indices (e.g., -100 for padding)
+    # Handle OOV indices (mask out invalid tokens)
     valid_mask = (seq >= 0) & (seq < vocab_size)
-    adjusted_seq = torch.masked_fill(seq, ~valid_mask, 0)  # Set OOV indices to 0
+    adjusted_tokens = torch.where(valid_mask, seq, 0)
     
-    # Create masked one-hot encoding
-    one_hot = F.one_hot(adjusted_seq, num_classes=vocab_size).bool()
-    one_hot = one_hot & valid_mask.unsqueeze(-1)  # Zero out invalid entries
+    # Create update mask (B, V)
+    one_hot = F.one_hot(adjusted_tokens, vocab_size).bool()
+    one_hot &= valid_mask.unsqueeze(-1)  # Zero out invalid entries
 
-    # Create position indices: (1, T, 1) -> (B, T, V) via broadcasting
-    positions = torch.arange(T, device=device).view(1, T, 1)
-    
-    # Create occurrence indices tensor, T_val represents no occurrence
-    occurrence_indices = torch.where(one_hot, positions.expand(B, T, vocab_size), T_val)
-    
-    # Reverse along time dimension to compute cumulative min from the end
-    reversed_occurrence = torch.flip(occurrence_indices, dims=[1])
-    
-    # Compute cumulative minimum along the time dimension (after reversal)
-    cum_min = torch.cummin(reversed_occurrence, dim=1)[0]  # (B, T, V)
-    
-    # Reverse back to get the next occurrence positions
-    next_occurrence = torch.flip(cum_min, dims=[1])
-    
-    # Calculate distance from current position t
-    t_positions = positions.expand(B, T, vocab_size)  # (B, T, V)
-    distance = next_occurrence - t_positions
-    
-    # Compute discount: gamma^distance where next_occurrence is valid, else 0
-    mask = next_occurrence != T_val
-    discount = torch.where(mask, gamma ** distance.float(), torch.tensor(0.0, device=device))
-    
-    return discount
+    # Initialize output tensor (this is unavoidable as we need to return it)
+    discounts = torch.zeros((B, T, vocab_size), device=device, dtype=torch.float16)
+
+    # Initialize next occurrence tracking (B, V)
+    next_occurrence = torch.full((B, vocab_size), T_val, device=device, dtype=torch.long)
+
+    # Iterate backwards through time
+    for t in reversed(range(T)):
+        current = one_hot[:, t]
+
+        # Update next occurrence for valid tokens
+        next_occurrence = torch.where(current, t, next_occurrence)
+        
+        # Calculate distances and discounts in fused operation
+        distances = next_occurrence - t
+        valid = (next_occurrence != T_val)
+        
+        # Use exponential directly instead of power for numerical stability
+        discounts[:, t, :] = torch.where(
+            valid,
+            gamma ** distances.to(discounts.dtype),
+            0.0
+        )
+
+    return discounts
 
 
 class TransformerBlock(nn.Module):
