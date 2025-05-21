@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
+from dataclasses import dataclass
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
@@ -29,7 +30,12 @@ if TYPE_CHECKING:
 
 logger = logging.get_logger(__name__)
 
-def seq_to_myopic(seq, vocab_size, gamma=0.75):
+@dataclass
+class MyopicLMOutputWithPast(CausalLMOutputWithPast):
+    ntp_loss: Optional[torch.FloatTensor] = None
+    myopic_loss: Optional[torch.FloatTensor] = None
+
+def seq_to_myopic(seq, vocab_size):
     """
     Memory-optimized version using incremental updates and mathematical transformations.
     Avoids creating full (B, T, V) intermediate tensors.
@@ -37,6 +43,12 @@ def seq_to_myopic(seq, vocab_size, gamma=0.75):
     B, T = seq.shape
     device = seq.device
     T_val = T  # Our "infinity" value
+
+    # Initialize output tensor (this is unavoidable as we need to return it)
+    discounts = torch.zeros((B, T, vocab_size), device=device, dtype=torch.float16)
+
+    # Initialize next occurrence tracking (B, V)
+    next_occurrence = torch.full((B, vocab_size), T_val, device=device, dtype=torch.long)
 
     # Handle OOV indices (mask out invalid tokens)
     valid_mask = (seq >= 0) & (seq < vocab_size)
@@ -46,12 +58,6 @@ def seq_to_myopic(seq, vocab_size, gamma=0.75):
     one_hot = F.one_hot(adjusted_tokens, vocab_size).bool()
     one_hot &= valid_mask.unsqueeze(-1)  # Zero out invalid entries
 
-    # Initialize output tensor (this is unavoidable as we need to return it)
-    discounts = torch.zeros((B, T, vocab_size), device=device, dtype=torch.float16)
-
-    # Initialize next occurrence tracking (B, V)
-    next_occurrence = torch.full((B, vocab_size), T_val, device=device, dtype=torch.long)
-
     # Iterate backwards through time
     for t in reversed(range(T)):
         current = one_hot[:, t]
@@ -60,18 +66,38 @@ def seq_to_myopic(seq, vocab_size, gamma=0.75):
         next_occurrence = torch.where(current, t, next_occurrence)
         
         # Calculate distances and discounts in fused operation
-        distances = next_occurrence - t
+        distances = next_occurrence - t + 1
         valid = (next_occurrence != T_val)
         
         # Use exponential directly instead of power for numerical stability
         discounts[:, t, :] = torch.where(
             valid,
-            gamma ** distances.to(discounts.dtype),
-            0.0
+            distances.to(discounts.dtype),
+            T
         )
 
-    return discounts
+    return T - discounts
 
+def list_net_loss(y_pred, y_true, eps=1e-8, padded_value_indicator=-100):
+    """
+    ListNet loss introduced in "Learning to Rank: From Pairwise Approach to Listwise Approach".
+    :param y_pred: predictions from the model, shape [*, slate_length]
+    :param y_true: ground truth labels, shape [*, slate_length]
+    :param eps: epsilon value, used for numerical stability
+    :param padded_value_indicator: an indicator of the y_true index containing a padded item, e.g. -1
+    :return: loss value, a torch.Tensor
+    """
+    mask = y_true == padded_value_indicator
+    y_pred[mask] = float('-inf')
+    y_true[mask] = float('-inf')
+
+    preds_smax = F.softmax(y_pred, dim=-1)
+    true_smax = F.softmax(y_true, dim=-1)
+
+    preds_smax = preds_smax + eps
+    preds_log = torch.log(preds_smax)
+
+    return torch.mean(-torch.sum(true_smax * preds_log, dim=-1))
 
 class TransformerBlock(nn.Module):
 
@@ -325,7 +351,6 @@ class TransformerForCausalLM(TransformerPreTrainedModel, GenerationMixin):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         if config.use_myopic_loss:
             self.myopic_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-            self.myopic_criterion = nn.BCEWithLogitsLoss()
         self.criterion = None
 
         # Initialize weights and apply final processing
@@ -421,6 +446,8 @@ class TransformerForCausalLM(TransformerPreTrainedModel, GenerationMixin):
         logits = None if fuse_linear_and_cross_entropy else self.lm_head(hidden_states[:, -logits_to_keep:])
 
         loss = None
+        ntp_loss = None
+        myopic_loss = None
         if labels is not None:
             if getattr(self, 'criterion', None) is None:
                 if fuse_linear_and_cross_entropy:
@@ -435,21 +462,32 @@ class TransformerForCausalLM(TransformerPreTrainedModel, GenerationMixin):
             labels = labels.to(hidden_states.device)
             labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
             if fuse_linear_and_cross_entropy:
-                loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
+                ntp_loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
             else:
-                loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))
+                ntp_loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))
 
             if self.config.use_myopic_loss:
-                myopic_labels = seq_to_myopic(labels, self.vocab_size, gamma=0.75)
+                myopic_labels = seq_to_myopic(labels, self.vocab_size)
                 myopic_logits = self.myopic_head(hidden_states)
-                loss += self.myopic_criterion(myopic_logits.view(-1, self.vocab_size), myopic_labels.view(-1, self.vocab_size))
+                myopic_loss = list_net_loss(myopic_logits, myopic_labels)
+                # print(f"NTP Loss: {ntp_loss.item()}, Myopic Loss: {myopic_loss.item()}")
+                # For debugging, get the index where the myopic label is the highest and print the corresponding logits
+                # idx_max = torch.argmax(myopic_labels.view(-1, self.vocab_size), dim=1)
+                # # Print the labels and logits at that index
+                # print(f"Labels: {myopic_labels.view(-1, self.vocab_size)[0, idx_max[0]-3:idx_max[0]+3]}")
+                # print(f"Logits: {F.sigmoid(myopic_logits).view(-1, self.vocab_size)[0, idx_max[0]-3:idx_max[0]+3]}")
+                loss = ntp_loss + myopic_loss
+            else:
+                loss = ntp_loss
 
         if not return_dict:
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
 
-        return CausalLMOutputWithPast(
+        return MyopicLMOutputWithPast(
             loss=loss,
+            ntp_loss=ntp_loss,
+            myopic_loss=myopic_loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
