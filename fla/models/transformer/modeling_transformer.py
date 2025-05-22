@@ -35,50 +35,6 @@ class MyopicLMOutputWithPast(CausalLMOutputWithPast):
     ntp_loss: Optional[torch.FloatTensor] = None
     myopic_loss: Optional[torch.FloatTensor] = None
 
-# def seq_to_myopic(seq, vocab_size, pad_token_id=-100):
-#     """
-#     Calculates the inverse distance to the next occurrence of each token in the sequence at each time step.
-#     :param seq: Input sequence of shape (B, T)
-#     :param vocab_size: Size of the vocabulary
-#     :param pad_token_id: Padding token ID
-#     :return: Tensor of shape (B, T, V) with the inverse distances to the next occurrence of each token in the vocabulary
-#     """
-#     B, T = seq.shape
-#     device = seq.device
-#     T_val = T  # Represents "infinity" for tokens without next occurrence
-
-#     # Initialize output tensor with float16 to save memory
-#     y = torch.zeros((B, T, vocab_size), device=device, dtype=torch.float16)
-
-#     # Track next occurrence with int32 to reduce memory usage
-#     next_occurrence = torch.full((B, vocab_size), T_val, device=device, dtype=torch.int32)
-
-#     # Iterate backwards through time to compute distances
-#     for t in reversed(range(T)):
-#         current_tokens = seq[:, t]
-#         valid = (current_tokens >= 0) & (current_tokens < vocab_size)
-        
-#         # Update next_occurrence for valid tokens using advanced indexing
-#         batch_indices = torch.where(valid)[0]  # Valid batch indices
-#         token_indices = current_tokens[batch_indices]  # Corresponding token indices
-#         next_occurrence[batch_indices, token_indices] = t
-        
-#         # Calculate distances and validity for current time step
-#         distances = next_occurrence - t + 1
-#         valid_distances = (next_occurrence != T_val)
-        
-#         # Populate output tensor
-#         y[:, t, :] = torch.where(
-#             valid_distances,
-#             1 / distances.to(y.dtype),
-#             float('-inf')
-#         )
-
-#     # Compute inverse distances and handle padding
-#     y.masked_fill_(seq.unsqueeze(-1) == pad_token_id, -100)
-    
-#     return y
-
 def seq_to_myopic(seq, vocab_size, pad_token_id=-100):
     """
     Calculates the inverse distance to the next occurrence of each token in the sequence at each time step.
