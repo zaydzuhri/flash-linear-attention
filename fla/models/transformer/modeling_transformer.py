@@ -35,17 +35,20 @@ class MyopicLMOutputWithPast(CausalLMOutputWithPast):
     ntp_loss: Optional[torch.FloatTensor] = None
     myopic_loss: Optional[torch.FloatTensor] = None
 
-def seq_to_myopic(seq, vocab_size):
+def seq_to_myopic(seq, vocab_size, pad_token_id=-100):
     """
-    Memory-optimized version using incremental updates and mathematical transformations.
-    Avoids creating full (B, T, V) intermediate tensors.
+    Calculates the inverse distance to the next occurrence of each token in the sequence at each time step.
+    :param seq: Input sequence of shape (B, T)
+    :param vocab_size: Size of the vocabulary
+    :param pad_token_id: Padding token ID
+    :return: Tensor of shape (B, T, V) with the inverse distances to the next occurrence of each token in the vocabulary
     """
     B, T = seq.shape
     device = seq.device
     T_val = T  # Our "infinity" value
 
     # Initialize output tensor (this is unavoidable as we need to return it)
-    discounts = torch.zeros((B, T, vocab_size), device=device, dtype=torch.float16)
+    y = torch.zeros((B, T, vocab_size), device=device, dtype=torch.float16)
 
     # Initialize next occurrence tracking (B, V)
     next_occurrence = torch.full((B, vocab_size), T_val, device=device, dtype=torch.long)
@@ -65,39 +68,27 @@ def seq_to_myopic(seq, vocab_size):
         # Update next occurrence for valid tokens
         next_occurrence = torch.where(current, t, next_occurrence)
         
-        # Calculate distances and discounts in fused operation
         distances = next_occurrence - t + 1
         valid = (next_occurrence != T_val)
         
-        # Use exponential directly instead of power for numerical stability
-        discounts[:, t, :] = torch.where(
+        y[:, t, :] = torch.where(
             valid,
-            distances.to(discounts.dtype),
+            distances.to(y.dtype),
             T
         )
 
-    return T - discounts
+    # Get inverse distances
+    y = T - y
+    return torch.where(seq[:, :, None] == pad_token_id, float('-inf'), y) # Mask out padding tokens
 
-def list_net_loss(y_pred, y_true, eps=1e-8, padded_value_indicator=-100):
+def list_net_loss(y_pred, y_true):
     """
     ListNet loss introduced in "Learning to Rank: From Pairwise Approach to Listwise Approach".
     :param y_pred: predictions from the model, shape [*, slate_length]
     :param y_true: ground truth labels, shape [*, slate_length]
-    :param eps: epsilon value, used for numerical stability
-    :param padded_value_indicator: an indicator of the y_true index containing a padded item, e.g. -1
     :return: loss value, a torch.Tensor
     """
-    mask = y_true == padded_value_indicator
-    y_pred[mask] = float('-inf')
-    y_true[mask] = float('-inf')
-
-    preds_smax = F.softmax(y_pred, dim=-1)
-    true_smax = F.softmax(y_true, dim=-1)
-
-    preds_smax = preds_smax + eps
-    preds_log = torch.log(preds_smax)
-
-    return torch.mean(-torch.sum(true_smax * preds_log, dim=-1))
+    return torch.mean(-torch.sum(F.softmax(y_true, dim=-1) * F.log_softmax(y_pred, dim=-1), dim=-1))
 
 class TransformerBlock(nn.Module):
 
