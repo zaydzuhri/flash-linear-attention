@@ -45,50 +45,51 @@ def seq_to_myopic(seq, vocab_size, pad_token_id=-100):
     """
     B, T = seq.shape
     device = seq.device
-    T_val = T  # Our "infinity" value
+    T_val = T  # Represents "infinity" for tokens without next occurrence
 
-    # Initialize output tensor (this is unavoidable as we need to return it)
+    # Initialize output tensor with float16 to save memory
     y = torch.zeros((B, T, vocab_size), device=device, dtype=torch.float16)
 
-    # Initialize next occurrence tracking (B, V)
-    next_occurrence = torch.full((B, vocab_size), T_val, device=device, dtype=torch.long)
+    # Track next occurrence with int32 to reduce memory usage
+    next_occurrence = torch.full((B, vocab_size), T_val, device=device, dtype=torch.int32)
 
-    # Handle OOV indices (mask out invalid tokens)
-    valid_mask = (seq >= 0) & (seq < vocab_size)
-    adjusted_tokens = torch.where(valid_mask, seq, 0)
-    
-    # Create update mask (B, V)
-    one_hot = F.one_hot(adjusted_tokens, vocab_size).bool()
-    one_hot &= valid_mask.unsqueeze(-1)  # Zero out invalid entries
-
-    # Iterate backwards through time
+    # Iterate backwards through time to compute distances
     for t in reversed(range(T)):
-        current = one_hot[:, t]
-
-        # Update next occurrence for valid tokens
-        next_occurrence = torch.where(current, t, next_occurrence)
+        current_tokens = seq[:, t]
+        valid = (current_tokens >= 0) & (current_tokens < vocab_size)
         
+        # Update next_occurrence for valid tokens using advanced indexing
+        batch_indices = torch.where(valid)[0]  # Valid batch indices
+        token_indices = current_tokens[batch_indices]  # Corresponding token indices
+        next_occurrence[batch_indices, token_indices] = t
+        
+        # Calculate distances and validity for current time step
         distances = next_occurrence - t + 1
-        valid = (next_occurrence != T_val)
+        valid_distances = (next_occurrence != T_val)
         
+        # Populate output tensor
         y[:, t, :] = torch.where(
-            valid,
-            distances.to(y.dtype),
-            T
+            valid_distances,
+            1 / distances.to(y.dtype),
+            float('-inf')
         )
 
-    # Get inverse distances
-    y = T - y
-    return torch.where(seq[:, :, None] == pad_token_id, float('-inf'), y) # Mask out padding tokens
+    # Compute inverse distances and handle padding
+    padding_mask = (seq.unsqueeze(-1) == pad_token_id)
+    y.masked_fill_(padding_mask, -100)
+    
+    return y
 
-def list_net_loss(y_pred, y_true):
+def list_net_loss(y_pred, y_true, pad_token_id=-100):
     """
     ListNet loss introduced in "Learning to Rank: From Pairwise Approach to Listwise Approach".
     :param y_pred: predictions from the model, shape [*, slate_length]
     :param y_true: ground truth labels, shape [*, slate_length]
+    :param pad_token_id: padding token id, default -100
     :return: loss value, a torch.Tensor
     """
-    return torch.mean(-torch.sum(F.softmax(y_true, dim=-1) * F.log_softmax(y_pred, dim=-1), dim=-1))
+    y_true = torch.where(y_true == pad_token_id, 0.0, F.softmax(y_true, dim=-1))
+    return torch.mean(-torch.sum(y_true * F.log_softmax(y_pred, dim=-1), dim=-1))
 
 class TransformerBlock(nn.Module):
 
