@@ -17,6 +17,9 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
+import triton
+import triton.language as tl
+
 from fla.layers.attn import Attention
 from fla.models.transformer.configuration_transformer import TransformerConfig
 from fla.models.utils import Cache
@@ -35,50 +38,97 @@ class MyopicLMOutputWithPast(CausalLMOutputWithPast):
     ntp_loss: Optional[torch.FloatTensor] = None
     myopic_loss: Optional[torch.FloatTensor] = None
 
-def seq_to_myopic(seq, vocab_size, pad_token_id=-100):
+@triton.jit
+def _seq_to_myopic_kernel(
+    seq_ptr,
+    output_ptr,
+    B,
+    T,
+    V,
+    pad_token_id,
+    T_val,
+    stride_seq_b,
+    stride_seq_t,
+    stride_out_b,
+    stride_out_t,
+    stride_out_v,
+    BLOCK_SIZE_V: tl.constexpr,
+):
+    b = tl.program_id(0)
+    v_block = tl.program_id(1)
+    
+    v_start = v_block * BLOCK_SIZE_V
+    v_end = tl.minimum(v_start + BLOCK_SIZE_V, V)
+    v_idx = tl.arange(0, BLOCK_SIZE_V)
+    v = v_start + v_idx
+    mask = v < V
+    
+    next_occurrence = tl.full((BLOCK_SIZE_V,), T_val, dtype=tl.int64)
+    
+    for t in range(T - 1, -1, -1):
+        token = tl.load(seq_ptr + b * stride_seq_b + t * stride_seq_t)
+        
+        if token == pad_token_id:
+            output_offset = (
+                b * stride_out_b +
+                t * stride_out_t +
+                v * stride_out_v
+            )
+            tl.store(output_ptr + output_offset, -100.0, mask=mask)
+        else:
+            in_block = (token >= v_start) & (token < v_end)
+            if in_block:
+                local_v = token - v_start
+                next_occurrence = tl.where(v_idx == local_v, t, next_occurrence)
+            
+            distance = next_occurrence - t + 1
+            valid = next_occurrence != T_val
+            value = tl.where(valid, T_val - distance, float('-inf'))
+            
+            output_offset = (
+                b * stride_out_b +
+                t * stride_out_t +
+                v * stride_out_v
+            )
+            tl.store(output_ptr + output_offset, value, mask=mask)
+
+def seq_to_myopic(seq: torch.Tensor, vocab_size: int, pad_token_id: int = -100) -> torch.Tensor:
     """
-    Calculates the inverse distance to the next occurrence of each token in the sequence at each time step.
+    Triton-optimized version of seq_to_myopic.
+    
     :param seq: Input sequence of shape (B, T)
     :param vocab_size: Size of the vocabulary
     :param pad_token_id: Padding token ID
-    :return: Tensor of shape (B, T, V) with the inverse distances to the next occurrence of each token in the vocabulary
+    :return: Tensor of shape (B, T, V) with inverse distances to next occurrence
     """
     B, T = seq.shape
     device = seq.device
-    T_val = T  # Our "infinity" value
-
-    # Initialize output tensor (this is unavoidable as we need to return it)
-    y = torch.zeros((B, T, vocab_size), device=device, dtype=torch.float16)
-
-    # Initialize next occurrence tracking (B, V)
-    next_occurrence = torch.full((B, vocab_size), T_val, device=device, dtype=torch.long)
-
-    # Handle OOV indices (mask out invalid tokens)
-    valid_mask = (seq >= 0) & (seq < vocab_size)
-    adjusted_tokens = torch.where(valid_mask, seq, 0)
     
-    # Create update mask (B, V)
-    one_hot = F.one_hot(adjusted_tokens, vocab_size).bool()
-    one_hot &= valid_mask.unsqueeze(-1)  # Zero out invalid entries
-
-    # Iterate backwards through time
-    for t in reversed(range(T)):
-        current = one_hot[:, t]
-
-        # Update next occurrence for valid tokens
-        next_occurrence = torch.where(current, t, next_occurrence)
-        
-        distances = next_occurrence - t + 1
-        valid = (next_occurrence != T_val)
-        
-        y[:, t, :] = torch.where(
-            valid,
-            T - distances.to(y.dtype),
-            float('-inf')
-        )
-
-    # Get inverse distances
-    return torch.where(seq[:, :, None] == pad_token_id, -100, y) # Mask out padding tokens
+    # Initialize output tensor with proper strides for efficient memory access
+    output = torch.empty((B, T, vocab_size), device=device, dtype=torch.float16)
+    if not output.is_contiguous():
+        output = output.contiguous()
+    
+    BLOCK_SIZE_V = 1024  # Tune this based on GPU capabilities
+    grid = (B, triton.cdiv(vocab_size, BLOCK_SIZE_V))
+    
+    _seq_to_myopic_kernel[grid](
+        seq,
+        output,
+        B,
+        T,
+        vocab_size,
+        pad_token_id,
+        T,
+        seq.stride(0),
+        seq.stride(1),
+        output.stride(0),
+        output.stride(1),
+        output.stride(2),
+        BLOCK_SIZE_V=BLOCK_SIZE_V,
+    )
+    
+    return output
 
 def list_net_loss(y_pred, y_true, pad_token_id=-100):
     """
