@@ -68,29 +68,21 @@ def _seq_to_myopic_kernel(
     for t in range(T - 1, -1, -1):
         token = tl.load(seq_ptr + b * stride_seq_b + t * stride_seq_t)
         
-        if token == pad_token_id:
-            output_offset = (
-                b * stride_out_b +
-                t * stride_out_t +
-                v * stride_out_v
-            )
-            tl.store(output_ptr + output_offset, -100.0, mask=mask)
-        else:
-            in_block = (token >= v_start) & (token < v_end)
-            if in_block:
-                local_v = token - v_start
-                next_occurrence = tl.where(v_idx == local_v, t, next_occurrence)
-            
-            distance = next_occurrence - t + 1
-            valid = next_occurrence != T_val
-            value = tl.where(valid, T_val - distance, float('-inf'))
-            
-            output_offset = (
-                b * stride_out_b +
-                t * stride_out_t +
-                v * stride_out_v
-            )
-            tl.store(output_ptr + output_offset, value, mask=mask)
+        in_block = (token >= v_start) & (token < v_end)
+        if in_block:
+            local_v = token - v_start
+            next_occurrence = tl.where(v_idx == local_v, t, next_occurrence)
+        
+        distance = next_occurrence - t + 1
+        valid = next_occurrence != T_val
+        value = tl.where(valid, T_val - distance, float('-inf'))
+        
+        output_offset = (
+            b * stride_out_b +
+            t * stride_out_t +
+            v * stride_out_v
+        )
+        tl.store(output_ptr + output_offset, value, mask=mask)
 
 def seq_to_myopic(seq: torch.Tensor, vocab_size: int, pad_token_id: int = -100) -> torch.Tensor:
     """
@@ -138,8 +130,7 @@ def list_net_loss(y_pred, y_true, pad_token_id=-100):
     :param pad_token_id: padding token id, default -100
     :return: loss value, a torch.Tensor
     """
-    y_true = torch.where(y_true == pad_token_id, 0.0, F.softmax(y_true, dim=-1))
-    return torch.mean(-torch.sum(y_true * F.log_softmax(y_pred, dim=-1), dim=-1))
+    return torch.mean(-torch.sum(F.softmax(y_true, dim=-1) * F.log_softmax(y_pred, dim=-1), dim=-1).nan_to_num(nan=0))
 
 class TransformerBlock(nn.Module):
 
