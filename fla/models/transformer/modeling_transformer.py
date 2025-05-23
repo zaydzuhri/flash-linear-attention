@@ -122,15 +122,14 @@ def seq_to_myopic(seq: torch.Tensor, vocab_size: int, pad_token_id: int = -100) 
     
     return output
 
-def list_net_loss(y_pred, y_true, pad_token_id=-100):
+def list_net_loss(y_pred, y_true):
     """
     ListNet loss introduced in "Learning to Rank: From Pairwise Approach to Listwise Approach".
     :param y_pred: predictions from the model, shape [*, slate_length]
     :param y_true: ground truth labels, shape [*, slate_length]
-    :param pad_token_id: padding token id, default -100
     :return: loss value, a torch.Tensor
     """
-    return torch.mean(-torch.sum(F.softmax(y_true, dim=-1) * F.log_softmax(y_pred, dim=-1), dim=-1).nan_to_num(nan=0))
+    return torch.mean(-torch.sum(F.softmax(y_true, dim=-1).nan_to_num(nan=0) * F.log_softmax(y_pred, dim=-1), dim=-1))
 
 class TransformerBlock(nn.Module):
 
@@ -494,13 +493,14 @@ class TransformerForCausalLM(TransformerPreTrainedModel, GenerationMixin):
             # Enable model parallelism
             labels = labels.to(hidden_states.device)
             labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
+            ntp_labels = labels[..., :hidden_states.shape[1]]
             if fuse_linear_and_cross_entropy:
-                ntp_loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
+                ntp_loss = criterion(hidden_states, ntp_labels, self.lm_head.weight, self.lm_head.bias)
             else:
-                ntp_loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))
+                ntp_loss = criterion(logits.view(ntp_labels.numel(), -1), ntp_labels.reshape(-1))
 
             if self.config.use_myopic_loss:
-                myopic_labels = seq_to_myopic(labels, self.vocab_size)
+                myopic_labels = seq_to_myopic(labels, self.vocab_size)[..., :hidden_states.shape[1], :]
                 myopic_logits = self.myopic_head(hidden_states)
                 myopic_loss = list_net_loss(myopic_logits, myopic_labels)
                 # print(f"NTP Loss: {ntp_loss.item()}, Myopic Loss: {myopic_loss.item()}")
