@@ -23,9 +23,10 @@ import triton.language as tl
 from fla.layers.attn import Attention
 from fla.models.transformer.configuration_transformer import TransformerConfig
 from fla.models.utils import Cache
-from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
+from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, FusedLinearListNetLoss
 from fla.modules import GatedMLP as TransformerMLP
 from fla.modules import RMSNorm
+from fla.modules.seq_to_myopic import seq_to_myopic
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -37,99 +38,6 @@ logger = logging.get_logger(__name__)
 class MyopicLMOutputWithPast(CausalLMOutputWithPast):
     ntp_loss: Optional[torch.FloatTensor] = None
     myopic_loss: Optional[torch.FloatTensor] = None
-
-@triton.jit
-def _seq_to_myopic_kernel(
-    seq_ptr,
-    output_ptr,
-    B,
-    T,
-    V,
-    pad_token_id,
-    T_val,
-    stride_seq_b,
-    stride_seq_t,
-    stride_out_b,
-    stride_out_t,
-    stride_out_v,
-    BLOCK_SIZE_V: tl.constexpr,
-):
-    b = tl.program_id(0)
-    v_block = tl.program_id(1)
-    
-    v_start = v_block * BLOCK_SIZE_V
-    v_end = tl.minimum(v_start + BLOCK_SIZE_V, V)
-    v_idx = tl.arange(0, BLOCK_SIZE_V)
-    v = v_start + v_idx
-    mask = v < V
-    
-    next_occurrence = tl.full((BLOCK_SIZE_V,), T_val, dtype=tl.int64)
-    
-    for t in range(T - 1, -1, -1):
-        token = tl.load(seq_ptr + b * stride_seq_b + t * stride_seq_t)
-        
-        in_block = (token >= v_start) & (token < v_end)
-        if in_block:
-            local_v = token - v_start
-            next_occurrence = tl.where(v_idx == local_v, t, next_occurrence)
-        
-        distance = next_occurrence - t + 1
-        valid = next_occurrence != T_val
-        value = tl.where(valid, T_val - distance, float('-inf'))
-        
-        output_offset = (
-            b * stride_out_b +
-            t * stride_out_t +
-            v * stride_out_v
-        )
-        tl.store(output_ptr + output_offset, value, mask=mask)
-
-def seq_to_myopic(seq: torch.Tensor, vocab_size: int, pad_token_id: int = -100) -> torch.Tensor:
-    """
-    Triton-optimized version of seq_to_myopic.
-    
-    :param seq: Input sequence of shape (B, T)
-    :param vocab_size: Size of the vocabulary
-    :param pad_token_id: Padding token ID
-    :return: Tensor of shape (B, T, V) with inverse distances to next occurrence
-    """
-    B, T = seq.shape
-    device = seq.device
-    
-    # Initialize output tensor with proper strides for efficient memory access
-    output = torch.empty((B, T, vocab_size), device=device, dtype=torch.float16)
-    if not output.is_contiguous():
-        output = output.contiguous()
-    
-    BLOCK_SIZE_V = 1024  # Tune this based on GPU capabilities
-    grid = (B, triton.cdiv(vocab_size, BLOCK_SIZE_V))
-    
-    _seq_to_myopic_kernel[grid](
-        seq,
-        output,
-        B,
-        T,
-        vocab_size,
-        pad_token_id,
-        T,
-        seq.stride(0),
-        seq.stride(1),
-        output.stride(0),
-        output.stride(1),
-        output.stride(2),
-        BLOCK_SIZE_V=BLOCK_SIZE_V,
-    )
-    
-    return output
-
-def list_net_loss(y_pred, y_true):
-    """
-    ListNet loss introduced in "Learning to Rank: From Pairwise Approach to Listwise Approach".
-    :param y_pred: predictions from the model, shape [*, slate_length]
-    :param y_true: ground truth labels, shape [*, slate_length]
-    :return: loss value, a torch.Tensor
-    """
-    return torch.mean(-torch.sum(F.softmax(y_true, dim=-1).nan_to_num(nan=0) * F.log_softmax(y_pred, dim=-1), dim=-1))
 
 class TransformerBlock(nn.Module):
 
@@ -383,6 +291,7 @@ class TransformerForCausalLM(TransformerPreTrainedModel, GenerationMixin):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         if config.use_myopic_loss:
             self.myopic_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+            self.myopic_criterion = FusedLinearListNetLoss()
         self.criterion = None
 
         # Initialize weights and apply final processing
@@ -493,16 +402,15 @@ class TransformerForCausalLM(TransformerPreTrainedModel, GenerationMixin):
             # Enable model parallelism
             labels = labels.to(hidden_states.device)
             labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-            ntp_labels = labels[..., :hidden_states.shape[1]]
+            ntp_labels = labels[..., :hidden_states.shape[1]].contiguous()
             if fuse_linear_and_cross_entropy:
                 ntp_loss = criterion(hidden_states, ntp_labels, self.lm_head.weight, self.lm_head.bias)
             else:
                 ntp_loss = criterion(logits.view(ntp_labels.numel(), -1), ntp_labels.reshape(-1))
 
             if self.config.use_myopic_loss:
-                myopic_labels = seq_to_myopic(labels, self.vocab_size)[..., :hidden_states.shape[1], :]
-                myopic_logits = self.myopic_head(hidden_states)
-                myopic_loss = list_net_loss(myopic_logits, myopic_labels)
+                myopic_labels = seq_to_myopic(labels, self.vocab_size, hidden_states.shape[1]).contiguous()
+                myopic_loss = self.myopic_criterion(hidden_states, myopic_labels, self.myopic_head.weight, self.myopic_head.bias)
                 # print(f"NTP Loss: {ntp_loss.item()}, Myopic Loss: {myopic_loss.item()}")
                 # For debugging, get the index where the myopic label is the highest and print the corresponding logits
                 # idx_max = torch.argmax(myopic_labels.view(-1, self.vocab_size), dim=1)

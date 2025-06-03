@@ -63,10 +63,6 @@ class TransformerConfig(PretrainedConfig):
         self.fuse_cross_entropy = fuse_cross_entropy
         self.vocab_size = vocab_size
 
-        # make sure that if use myopic loss, fuse_cross_entropy is set to False
-        assert not (use_myopic_loss and fuse_cross_entropy), (
-            "If use_myopic_loss is set to True, fuse_cross_entropy must be set to False."
-        )
         self.use_myopic_loss = use_myopic_loss
 
         super().__init__(

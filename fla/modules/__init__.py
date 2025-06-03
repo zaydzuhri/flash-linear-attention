@@ -5,6 +5,7 @@ from fla.modules.fused_bitlinear import BitLinear, FusedBitLinear
 from fla.modules.fused_cross_entropy import FusedCrossEntropyLoss
 from fla.modules.fused_kl_div import FusedKLDivLoss
 from fla.modules.fused_linear_cross_entropy import FusedLinearCrossEntropyLoss
+from fla.modules.fused_linear_listnet_loss import FusedLinearListNetLoss
 from fla.modules.fused_norm_gate import (
     FusedLayerNormGated,
     FusedLayerNormSwishGate,
