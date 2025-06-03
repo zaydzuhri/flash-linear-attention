@@ -293,6 +293,7 @@ class TransformerForCausalLM(TransformerPreTrainedModel, GenerationMixin):
             self.myopic_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
             self.myopic_criterion = FusedLinearListNetLoss()
         self.criterion = None
+        self.pad_token_id = config.pad_token_id
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -409,7 +410,7 @@ class TransformerForCausalLM(TransformerPreTrainedModel, GenerationMixin):
                 ntp_loss = criterion(logits.view(ntp_labels.numel(), -1), ntp_labels.reshape(-1))
 
             if self.config.use_myopic_loss:
-                myopic_labels = seq_to_myopic(labels, self.vocab_size, hidden_states.shape[1]).contiguous()
+                myopic_labels = seq_to_myopic(labels, self.vocab_size, hidden_states.shape[1], pad_token_id=self.pad_token_id).contiguous()
                 myopic_loss = self.myopic_criterion(hidden_states, myopic_labels, self.myopic_head.weight, self.myopic_head.bias)
                 # print(f"NTP Loss: {ntp_loss.item()}, Myopic Loss: {myopic_loss.item()}")
                 # For debugging, get the index where the myopic label is the highest and print the corresponding logits
