@@ -2,12 +2,12 @@
 
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
 
-from fla.models.transformer.configuration_transformer import TransformerConfig
-from fla.models.transformer.modeling_transformer import TransformerForCausalLM, TransformerModel
+from fla.models.transformer_mtp.configuration_transformer import MTPTransformerConfig
+from fla.models.transformer_mtp.modeling_transformer import MTPTransformerForCausalLM, MTPTransformerModel
 
-AutoConfig.register(TransformerConfig.model_type, TransformerConfig)
-AutoModel.register(TransformerConfig, TransformerModel)
-AutoModelForCausalLM.register(TransformerConfig, TransformerForCausalLM)
+AutoConfig.register(MTPTransformerConfig.model_type, MTPTransformerConfig)
+AutoModel.register(MTPTransformerConfig, MTPTransformerModel)
+AutoModelForCausalLM.register(MTPTransformerConfig, MTPTransformerForCausalLM)
 
 
 __all__ = ['TransformerConfig', 'TransformerForCausalLM', 'TransformerModel']

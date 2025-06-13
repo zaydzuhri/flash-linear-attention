@@ -7,7 +7,7 @@ from transformers.configuration_utils import PretrainedConfig
 
 class MTPTransformerConfig(PretrainedConfig):
 
-    model_type = 'transformer'
+    model_type = 'mtp_transformer'
     keys_to_ignore_at_inference = ['past_key_values']
 
     def __init__(

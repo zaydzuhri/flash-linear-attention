@@ -97,60 +97,58 @@ class SequentialHeadsCustomBackward(torch.autograd.Function):
         return (d.grad,) + (None,) * num_nones
 
 def seq_to_mtp(
-    input_ids: torch.Tensor,
-    n_future_tokens: int,
-    ignore_index: int = -100
+    long_input_ids: torch.Tensor,
+    model_seq_len: int,
+    n_future_tokens: int
 ) -> torch.Tensor:
     """
-    Generates a tensor of future targets on the fly from a batch of input sequences.
+    Generates a tensor of future targets on the fly from a long input sequence.
 
-    This function is designed to be used within a model's forward pass. It takes
-    the input sequences and creates a target tensor where, for each position `t`,
-    the target contains the next `n_future_tokens`.
-
-    This implementation is fully vectorized for performance, avoiding Python loops.
-    It works by padding the input and then creating sliding windows.
+    This version assumes `long_input_ids` contains both the tokens for the model's
+    input AND the future tokens needed for the labels.
+    It extracts the correct targets without adding artificial padding.
 
     Args:
-        input_ids (torch.Tensor): The input sequences, shape (B, T).
+        long_input_ids (torch.Tensor): The input sequences from the dataloader,
+                                       shape (B, T + n_future_tokens).
+        model_seq_len (int): The sequence length `T` that the model processes.
         n_future_tokens (int): The number of future tokens to predict for each time step.
-        ignore_index (int): The value to use for padding where future tokens are not available.
-                              This value is ignored by loss functions like CrossEntropyLoss.
 
     Returns:
         torch.Tensor: The target tensor of shape (B, T, n_future_tokens).
                       y[b, t, k] corresponds to the (k+1)-th token after input_ids[b, t].
     """
-    B, T = input_ids.shape
+    B, total_len = long_input_ids.shape
+    assert total_len >= model_seq_len + n_future_tokens, \
+        "long_input_ids must be at least model_seq_len + n_future_tokens long."
 
-    # 1. Pad the input tensor on the right.
-    # We add `n_future_tokens` of padding so that we can create windows for all
-    # time steps without going out of bounds.
-    # Example (n=3): [t0, t1, t2, t3] -> [t0, t1, t2, t3, -100, -100, -100]
-    padded_ids = F.pad(input_ids, (0, n_future_tokens), mode='constant', value=ignore_index)
-
-    # 2. Create sliding windows (views) over the padded tensor.
+    # 1. Create sliding windows (views) over the long tensor.
     # .unfold() is a highly efficient way to create sliding windows.
     # We create windows of size `n_future_tokens + 1`. For each time step `t`,
     # the window will contain the input token and its `n_future_tokens` targets.
     # Example (n=3, window_size=4):
     # For t=0, window is [t0, t1, t2, t3]
-    # For t=1, window is [t1, t2, t3, -100]
-    # Shape of windows: (B, T, n_future_tokens + 1)
-    windows = padded_ids.unfold(dimension=1, size=n_future_tokens + 1, step=1)
+    # For t=1, window is [t1, t2, t3, t4]
+    # Shape of windows: (B, total_len - n_future_tokens, n_future_tokens + 1)
+    windows = long_input_ids.unfold(dimension=1, size=n_future_tokens + 1, step=1)
 
-    # 3. Slice the windows to get only the targets.
+    # 2. Slice the windows to get only the targets.
     # We slice off the first element of each window (the input token itself)
     # to keep only the future tokens.
     # Example window [t0, t1, t2, t3] -> becomes targets [t1, t2, t3]
-    # The final shape is the desired (B, T, n_future_tokens).
-    output_targets = windows[:, :, 1:]
+    all_targets = windows[:, :, 1:]
+
+    # 3. Trim the result to match the model's output sequence length.
+    # We only need the targets for the first `model_seq_len` positions.
+    output_targets = all_targets[:, :model_seq_len, :]
 
     return output_targets.transpose(1, 2)
+
 
 @dataclass
 class MTPLMOutputWithPast(CausalLMOutputWithPast):
     ntp_loss: Optional[torch.FloatTensor] = None
+    mtp_loss: Optional[torch.FloatTensor] = None
 
 class MTPTransformerBlock(nn.Module):
 
@@ -384,7 +382,7 @@ class MTPTransformerModel(MTPTransformerPreTrainedModel):
             if output_attentions:
                 all_attns += (layer_outputs[1],)
 
-        trunk = x
+        trunk = hidden_states
 
         n_heads_to_use = self.config.n_future_tokens if return_all_heads else 1
         prediction_heads = self.extra_heads
@@ -426,7 +424,7 @@ class MTPTransformerModel(MTPTransformerPreTrainedModel):
                 if output_attentions:
                     all_attns += (layer_outputs[1],)
 
-            hidden_states = torch.stack(latents, dim=-2)
+            hidden_states = torch.stack(latents, dim=-2) # (B, T, n_heads_to_use, D)
             hidden_states = self.norm(hidden_states)
 
         # add hidden states from the last decoder layer
@@ -544,7 +542,8 @@ class MTPTransformerForCausalLM(MTPTransformerPreTrainedModel, GenerationMixin):
             **kwargs
         )
 
-        hidden_states = outputs[0]
+        hidden_states = outputs[0] # (B, T, n_heads_to_use, D)
+        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
 
         use_custom_backward = self.config.use_custom_backward and self.training
         if use_custom_backward and self.training:
@@ -552,38 +551,50 @@ class MTPTransformerForCausalLM(MTPTransformerPreTrainedModel, GenerationMixin):
                 hidden_states, self.lm_head, self.model.norm, logits_to_keep, *self.model.extra_heads
             )
         else:
-            all_logits = self.lm_head(hidden_states[:, -logits_to_keep:])
+            all_logits = None if fuse_linear_and_cross_entropy else self.lm_head(hidden_states[:, -logits_to_keep:])
 
         loss = None
         if labels is not None:
-            B, T, n_heads_prediction, V = all_logits.shape
-            loss = torch.zeros(1, device=all_logits.device)
-            ntp_loss = torch.zeros(1, device=all_logits.device)
+            B, T, n_heads_prediction, D = hidden_states.shape
+            loss = torch.zeros(1, device=hidden_states.device)
+            ntp_loss = torch.zeros(1, device=hidden_states.device)
+            mtp_loss = torch.zeros(1, device=hidden_states.device)
             if getattr(self, 'criterion', None) is None:
-                criterion = nn.CrossEntropyLoss()
+                if fuse_linear_and_cross_entropy:
+                    criterion = FusedLinearCrossEntropyLoss()
+                elif self.config.fuse_cross_entropy:
+                    criterion = FusedCrossEntropyLoss(inplace_backward=True)
+                else:
+                    criterion = nn.CrossEntropyLoss()
             else:
                 criterion = self.criterion
             # Enable model parallelism
             labels = labels.to(hidden_states.device)
-            labels = seq_to_mtp(labels, n_future_tokens=n_heads_prediction, ignore_index=criterion.ignore_index)
+            all_labels = seq_to_mtp(labels, n_future_tokens=n_heads_prediction, model_seq_len=T)
             # Loop across prediction heads
             for i in range(n_heads_prediction):
-                logits = all_logits[:, :, i, :]
                 # labels in the shape of (B, n_heads_prediction, T)
-                labels = labels[:, i, :]
-                current_loss = criterion(logits.view(-1, V), labels.reshape(-1))
+                labels = all_labels[:, i, :]
+                if fuse_linear_and_cross_entropy:
+                    current_loss = criterion(hidden_states[:, :, i, :], labels.contiguous(), self.lm_head.weight, self.lm_head.bias)
+                else:
+                    logits = all_logits[:, :, i, :]
+                    current_loss = criterion(logits.view(labels.numel(), -1), labels.reshape(-1))
                 if i == 0: # NTP
                     ntp_loss = current_loss
+                else:
+                    mtp_loss += current_loss
                 loss += current_loss
 
         if not return_dict:
-            output = (logits,) + outputs[1:]
+            output = (all_logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
 
         return MTPLMOutputWithPast(
             loss=loss,
             ntp_loss=ntp_loss if loss is not None else None,
-            logits=logits,
+            mtp_loss=mtp_loss if loss is not None else None,
+            logits=all_logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
