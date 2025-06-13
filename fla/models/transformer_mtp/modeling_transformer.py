@@ -26,7 +26,6 @@ from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as TransformerMLP
 from fla.modules import RMSNorm
-from fla.modules.seq_to_myopic import seq_to_myopic
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -34,9 +33,124 @@ if TYPE_CHECKING:
 
 logger = logging.get_logger(__name__)
 
+class SequentialHeadsCustomBackward(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, trunk_output, lm_head, norm_layer, logits_to_keep, *prediction_heads):
+        # We now need the norm layer in the forward pass calculation
+        ctx.prediction_heads = prediction_heads
+        ctx.lm_head = lm_head
+        ctx.norm_layer = norm_layer 
+        ctx.logits_to_keep = logits_to_keep
+        ctx.save_for_backward(trunk_output)
+
+        latents = []
+        for head in prediction_heads:
+            # Assuming head forward signature is `head(hidden_states)`
+            latent = head(trunk_output)[0]
+            latents.append(latent)
+
+        latents_stacked = torch.stack(latents, dim=-2)
+        # Apply the final norm before the lm_head
+        normalized_latents = norm_layer(latents_stacked)
+        all_logits = lm_head(normalized_latents[:, -logits_to_keep:])
+        return all_logits
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        trunk_output, = ctx.saved_tensors
+        prediction_heads = ctx.prediction_heads
+        lm_head = ctx.lm_head
+        norm_layer = ctx.norm_layer
+        logits_to_keep = ctx.logits_to_keep
+
+        d = trunk_output.detach().requires_grad_(True)
+        grad_output_per_head = grad_output.unbind(dim=2)
+        
+        # We need to manually handle the backward pass for the final norm layer once
+        # before the loop, as its gradient depends on all heads.
+        # To do this, we reconstruct the input to the lm_head and do a backward pass.
+        with torch.enable_grad():
+            # Re-run the head computations to get the input to the norm layer
+            latents = []
+            for head in prediction_heads:
+                latents.append(head(d)[0])
+            latents_stacked = torch.stack(latents, dim=-2)
+            latents_stacked.requires_grad_(True)
+            # The part of the graph we need to backprop through first
+            normalized_latents = norm_layer(latents_stacked)
+        
+        # Backpropagate through the lm_head and norm_layer
+        normalized_latents.backward(lm_head.weight.grad @ grad_output)
+        
+        # Now, `latents_stacked.grad` contains the sum of gradients from all heads
+        # just before the final normalization. We can now unbind it.
+        grad_per_head_latent = latents_stacked.grad.unbind(dim=-2)
+
+        # Now, backpropagate through each head individually.
+        for i, head in enumerate(prediction_heads):
+            with torch.enable_grad():
+                head_latent = head(d)[0]
+            # Backpropagate using the gradient for this specific head's output
+            head_latent.backward(gradient=grad_per_head_latent[i])
+
+        num_nones = 2 + len(prediction_heads) # for lm_head, norm_layer, and *prediction_heads
+        return (d.grad,) + (None,) * num_nones
+
+def seq_to_mtp(
+    input_ids: torch.Tensor,
+    n_future_tokens: int,
+    ignore_index: int = -100
+) -> torch.Tensor:
+    """
+    Generates a tensor of future targets on the fly from a batch of input sequences.
+
+    This function is designed to be used within a model's forward pass. It takes
+    the input sequences and creates a target tensor where, for each position `t`,
+    the target contains the next `n_future_tokens`.
+
+    This implementation is fully vectorized for performance, avoiding Python loops.
+    It works by padding the input and then creating sliding windows.
+
+    Args:
+        input_ids (torch.Tensor): The input sequences, shape (B, T).
+        n_future_tokens (int): The number of future tokens to predict for each time step.
+        ignore_index (int): The value to use for padding where future tokens are not available.
+                              This value is ignored by loss functions like CrossEntropyLoss.
+
+    Returns:
+        torch.Tensor: The target tensor of shape (B, T, n_future_tokens).
+                      y[b, t, k] corresponds to the (k+1)-th token after input_ids[b, t].
+    """
+    B, T = input_ids.shape
+
+    # 1. Pad the input tensor on the right.
+    # We add `n_future_tokens` of padding so that we can create windows for all
+    # time steps without going out of bounds.
+    # Example (n=3): [t0, t1, t2, t3] -> [t0, t1, t2, t3, -100, -100, -100]
+    padded_ids = F.pad(input_ids, (0, n_future_tokens), mode='constant', value=ignore_index)
+
+    # 2. Create sliding windows (views) over the padded tensor.
+    # .unfold() is a highly efficient way to create sliding windows.
+    # We create windows of size `n_future_tokens + 1`. For each time step `t`,
+    # the window will contain the input token and its `n_future_tokens` targets.
+    # Example (n=3, window_size=4):
+    # For t=0, window is [t0, t1, t2, t3]
+    # For t=1, window is [t1, t2, t3, -100]
+    # Shape of windows: (B, T, n_future_tokens + 1)
+    windows = padded_ids.unfold(dimension=1, size=n_future_tokens + 1, step=1)
+
+    # 3. Slice the windows to get only the targets.
+    # We slice off the first element of each window (the input token itself)
+    # to keep only the future tokens.
+    # Example window [t0, t1, t2, t3] -> becomes targets [t1, t2, t3]
+    # The final shape is the desired (B, T, n_future_tokens).
+    output_targets = windows[:, :, 1:]
+
+    return output_targets.transpose(1, 2)
+
 @dataclass
 class MTPLMOutputWithPast(CausalLMOutputWithPast):
-    pass
+    ntp_loss: Optional[torch.FloatTensor] = None
 
 class MTPTransformerBlock(nn.Module):
 
@@ -205,6 +319,12 @@ class MTPTransformerModel(MTPTransformerPreTrainedModel):
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        use_custom_backward = self.config.use_custom_backward and self.training 
+        if self.training and return_all_heads is False:
+            logger.warning_once(
+                "`return_all_heads=False` is incompatible with training. Setting `return_all_heads=True`..."
+            )
+            return_all_heads = True
 
         # retrieve input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
@@ -267,12 +387,50 @@ class MTPTransformerModel(MTPTransformerPreTrainedModel):
         trunk = x
 
         n_heads_to_use = self.config.n_future_tokens if return_all_heads else 1
-        prediction_heads = [self.]
+        prediction_heads = self.extra_heads
 
-        hidden_states = self.norm(hidden_states)
+        if use_custom_backward and self.training:
+            # all_logits = SequentialHeadsCustomBackward.apply(trunk, self.lm_head, *prediction_heads)
+            hidden_states = trunk # return hidden states and apply custom backward on the MTPTransformersLM
+        else:
+            latents = []
+            for i, layer in enumerate(prediction_heads):
+                if output_hidden_states:
+                    all_hidden_states += (hidden_states,)
+
+                if self.gradient_checkpointing and self.training:
+                    layer_outputs = self._gradient_checkpointing_func(
+                        layer.__call__,
+                        trunk, # Use trunk instead of hidden states
+                        attention_mask,
+                        past_key_values,
+                        output_attentions,
+                        use_cache,
+                        **kwargs
+                    )
+                else:
+                    layer_outputs = layer(
+                        trunk,  # Use trunk instead of hidden states
+                        attention_mask=attention_mask,
+                        past_key_values=past_key_values,
+                        output_attentions=output_attentions,
+                        use_cache=use_cache,
+                        **kwargs
+                    )
+                hidden_states = layer_outputs[0]
+                latents.append(hidden_states)
+
+                if use_cache:
+                    next_cache = layer_outputs[2 if output_attentions else 1]
+                
+                if output_attentions:
+                    all_attns += (layer_outputs[1],)
+
+            hidden_states = torch.stack(latents, dim=-2)
+            hidden_states = self.norm(hidden_states)
 
         # add hidden states from the last decoder layer
-        if output_hidden_states:
+        if output_hidden_states and not self.custom_backward:
             all_hidden_states += (hidden_states,)
 
         if not return_dict:
@@ -387,27 +545,36 @@ class MTPTransformerForCausalLM(MTPTransformerPreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
-        logits = None if fuse_linear_and_cross_entropy else self.lm_head(hidden_states[:, -logits_to_keep:])
+
+        use_custom_backward = self.config.use_custom_backward and self.training
+        if use_custom_backward and self.training:
+            all_logits = SequentialHeadsCustomBackward.apply(
+                hidden_states, self.lm_head, self.model.norm, logits_to_keep, *self.model.extra_heads
+            )
+        else:
+            all_logits = self.lm_head(hidden_states[:, -logits_to_keep:])
 
         loss = None
         if labels is not None:
+            B, T, n_heads_prediction, V = all_logits.shape
+            loss = torch.zeros(1, device=all_logits.device)
+            ntp_loss = torch.zeros(1, device=all_logits.device)
             if getattr(self, 'criterion', None) is None:
-                if fuse_linear_and_cross_entropy:
-                    criterion = FusedLinearCrossEntropyLoss()
-                elif self.config.fuse_cross_entropy:
-                    criterion = FusedCrossEntropyLoss(inplace_backward=True)
-                else:
-                    criterion = nn.CrossEntropyLoss()
+                criterion = nn.CrossEntropyLoss()
             else:
                 criterion = self.criterion
             # Enable model parallelism
             labels = labels.to(hidden_states.device)
-            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-            if fuse_linear_and_cross_entropy:
-                loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
-            else:
-                loss = criterion(logits.view(labels.numel(), -1), labels.reshape(-1))
+            labels = seq_to_mtp(labels, n_future_tokens=n_heads_prediction, ignore_index=criterion.ignore_index)
+            # Loop across prediction heads
+            for i in range(n_heads_prediction):
+                logits = all_logits[:, :, i, :]
+                # labels in the shape of (B, n_heads_prediction, T)
+                labels = labels[:, i, :]
+                current_loss = criterion(logits.view(-1, V), labels.reshape(-1))
+                if i == 0: # NTP
+                    ntp_loss = current_loss
+                loss += current_loss
 
         if not return_dict:
             output = (logits,) + outputs[1:]
@@ -415,6 +582,7 @@ class MTPTransformerForCausalLM(MTPTransformerPreTrainedModel, GenerationMixin):
 
         return MTPLMOutputWithPast(
             loss=loss,
+            ntp_loss=ntp_loss if loss is not None else None,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,

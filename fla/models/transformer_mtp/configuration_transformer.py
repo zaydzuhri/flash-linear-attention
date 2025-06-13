@@ -36,7 +36,8 @@ class MTPTransformerConfig(PretrainedConfig):
         fuse_swiglu: bool = True,
         fuse_cross_entropy: bool = True,
         vocab_size: int = 32000,
-        n_future_tokens: int = 1
+        n_future_tokens: int = 1,
+        use_custom_backward: Optional[bool] = False,
         **kwargs,
     ):
         self.hidden_size = hidden_size
@@ -64,6 +65,7 @@ class MTPTransformerConfig(PretrainedConfig):
         self.vocab_size = vocab_size
 
         self.n_future_tokens = n_future_tokens
+        self.use_custom_backward = use_custom_backward
 
         super().__init__(
             pad_token_id=pad_token_id,
