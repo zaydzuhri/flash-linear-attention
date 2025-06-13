@@ -36,7 +36,6 @@ class TransformerConfig(PretrainedConfig):
         fuse_swiglu: bool = True,
         fuse_cross_entropy: bool = True,
         vocab_size: int = 32000,
-        use_myopic_loss: bool = False,
         **kwargs,
     ):
         self.hidden_size = hidden_size
@@ -62,8 +61,6 @@ class TransformerConfig(PretrainedConfig):
         self.fuse_swiglu = fuse_swiglu
         self.fuse_cross_entropy = fuse_cross_entropy
         self.vocab_size = vocab_size
-
-        self.use_myopic_loss = use_myopic_loss
 
         super().__init__(
             pad_token_id=pad_token_id,

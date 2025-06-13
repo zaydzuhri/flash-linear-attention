@@ -5,9 +5,9 @@ from typing import Optional
 from transformers.configuration_utils import PretrainedConfig
 
 
-class MTPTransformerConfig(PretrainedConfig):
+class TOPTransformerConfig(PretrainedConfig):
 
-    model_type = 'transformer'
+    model_type = 'top_transformer'
     keys_to_ignore_at_inference = ['past_key_values']
 
     def __init__(
@@ -36,6 +36,8 @@ class MTPTransformerConfig(PretrainedConfig):
         fuse_swiglu: bool = True,
         fuse_cross_entropy: bool = True,
         vocab_size: int = 32000,
+        use_top_loss: bool = False,
+        top_window_size: Optional[int] = None,
         **kwargs,
     ):
         self.hidden_size = hidden_size
@@ -61,6 +63,9 @@ class MTPTransformerConfig(PretrainedConfig):
         self.fuse_swiglu = fuse_swiglu
         self.fuse_cross_entropy = fuse_cross_entropy
         self.vocab_size = vocab_size
+
+        self.use_top_loss = use_top_loss
+        self.top_window_size = top_window_size if top_window_size is not None else max_position_embeddings
 
         super().__init__(
             pad_token_id=pad_token_id,

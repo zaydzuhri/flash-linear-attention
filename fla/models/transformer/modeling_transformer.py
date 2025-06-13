@@ -8,25 +8,19 @@ from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.utils.checkpoint
-from dataclasses import dataclass
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
-import triton
-import triton.language as tl
-
 from fla.layers.attn import Attention
 from fla.models.transformer.configuration_transformer import TransformerConfig
 from fla.models.utils import Cache
-from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, FusedLinearListNetLoss
+from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as TransformerMLP
 from fla.modules import RMSNorm
-from fla.modules.seq_to_myopic import seq_to_myopic
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -34,10 +28,6 @@ if TYPE_CHECKING:
 
 logger = logging.get_logger(__name__)
 
-@dataclass
-class TOPLMOutputWithPast(CausalLMOutputWithPast):
-    ntp_loss: Optional[torch.FloatTensor] = None
-    top_loss: Optional[torch.FloatTensor] = None
 
 class TransformerBlock(nn.Module):
 
@@ -289,11 +279,7 @@ class TransformerForCausalLM(TransformerPreTrainedModel, GenerationMixin):
         self.model = TransformerModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        if config.use_myopic_loss:
-            self.myopic_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-            self.myopic_criterion = FusedLinearListNetLoss()
         self.criterion = None
-        self.pad_token_id = config.pad_token_id
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -388,8 +374,6 @@ class TransformerForCausalLM(TransformerPreTrainedModel, GenerationMixin):
         logits = None if fuse_linear_and_cross_entropy else self.lm_head(hidden_states[:, -logits_to_keep:])
 
         loss = None
-        ntp_loss = None
-        myopic_loss = None
         if labels is not None:
             if getattr(self, 'criterion', None) is None:
                 if fuse_linear_and_cross_entropy:
@@ -403,33 +387,18 @@ class TransformerForCausalLM(TransformerPreTrainedModel, GenerationMixin):
             # Enable model parallelism
             labels = labels.to(hidden_states.device)
             labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-            ntp_labels = labels[..., :hidden_states.shape[1]].contiguous()
+            labels = labels[..., :hidden_states.shape[1]].contiguous()
             if fuse_linear_and_cross_entropy:
-                ntp_loss = criterion(hidden_states, ntp_labels, self.lm_head.weight, self.lm_head.bias)
+                loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
             else:
-                ntp_loss = criterion(logits.view(ntp_labels.numel(), -1), ntp_labels.reshape(-1))
-
-            if self.config.use_myopic_loss:
-                myopic_labels = seq_to_myopic(labels, self.vocab_size, hidden_states.shape[1], pad_token_id=self.pad_token_id).contiguous()
-                myopic_loss = self.myopic_criterion(hidden_states, myopic_labels, self.myopic_head.weight, self.myopic_head.bias)
-                # print(f"NTP Loss: {ntp_loss.item()}, Myopic Loss: {myopic_loss.item()}")
-                # For debugging, get the index where the myopic label is the highest and print the corresponding logits
-                # idx_max = torch.argmax(myopic_labels.view(-1, self.vocab_size), dim=1)
-                # # Print the labels and logits at that index
-                # print(f"Labels: {myopic_labels.view(-1, self.vocab_size)[0, idx_max[0]-3:idx_max[0]+3]}")
-                # print(f"Logits: {F.sigmoid(myopic_logits).view(-1, self.vocab_size)[0, idx_max[0]-3:idx_max[0]+3]}")
-                loss = ntp_loss + myopic_loss
-            else:
-                loss = ntp_loss
+                loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))
 
         if not return_dict:
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
 
-        return TOPLMOutputWithPast(
+        return CausalLMOutputWithPast(
             loss=loss,
-            ntp_loss=ntp_loss,
-            top_loss=myopic_loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,

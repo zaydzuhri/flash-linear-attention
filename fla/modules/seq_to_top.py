@@ -13,7 +13,7 @@ import triton.language as tl
     key=['V'],
 )
 @triton.jit
-def _seq_to_myopic_kernel(
+def _seq_to_top_kernel(
     seq_ptr,
     output_ptr,
     B,
@@ -64,14 +64,14 @@ def _seq_to_myopic_kernel(
             )
             tl.store(output_ptr + output_offset, value, mask=mask)
 
-def seq_to_myopic(
+def seq_to_top(
     seq: torch.Tensor, 
     vocab_size: int, 
     window_size: int,
     pad_token_id: int = -100
 ) -> torch.Tensor:
     """
-    Triton-optimized myopic sequence processing with autotuned block size.
+    Triton-optimized top sequence processing with autotuned block size.
     
     :param seq: Input sequence of shape (B, T + window_size)
     :param vocab_size: Size of the vocabulary
@@ -91,7 +91,7 @@ def seq_to_myopic(
     # Let autotune select the best BLOCK_SIZE_V based on vocab_size
     grid = (B, triton.cdiv(vocab_size, 128))  # Start with minimum block size
     
-    _seq_to_myopic_kernel[grid](
+    _seq_to_top_kernel[grid](
         seq,
         output,
         B,

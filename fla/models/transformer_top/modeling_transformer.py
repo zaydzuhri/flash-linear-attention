@@ -21,12 +21,12 @@ import triton
 import triton.language as tl
 
 from fla.layers.attn import Attention
-from fla.models.transformer_mtp.configuration_transformer import MTPTransformerConfig
+from fla.models.transformer.configuration_transformer import TOPTransformerConfig
 from fla.models.utils import Cache
-from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
+from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, FusedLinearListNetLoss
 from fla.modules import GatedMLP as TransformerMLP
 from fla.modules import RMSNorm
-from fla.modules.seq_to_myopic import seq_to_myopic
+from fla.modules.seq_to_top import seq_to_top
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -35,12 +35,13 @@ if TYPE_CHECKING:
 logger = logging.get_logger(__name__)
 
 @dataclass
-class MTPLMOutputWithPast(CausalLMOutputWithPast):
-    pass
+class TOPLMOutputWithPast(CausalLMOutputWithPast):
+    ntp_loss: Optional[torch.FloatTensor] = None
+    top_loss: Optional[torch.FloatTensor] = None
 
-class MTPTransformerBlock(nn.Module):
+class TOPTransformerBlock(nn.Module):
 
-    def __init__(self, config: MTPTransformerConfig, layer_idx: int):
+    def __init__(self, config: TOPTransformerConfig, layer_idx: int):
         super().__init__()
 
         self.config = config
@@ -108,12 +109,12 @@ class MTPTransformerBlock(nn.Module):
         return outputs
 
 
-class MTPTransformerPreTrainedModel(PreTrainedModel):
+class TOPTransformerPreTrainedModel(PreTrainedModel):
 
-    config_class = MTPTransformerConfig
+    config_class = TOPTransformerConfig
     base_model_prefix = 'model'
     supports_gradient_checkpointing = True
-    _no_split_modules = ['MTPTransformerBlock']
+    _no_split_modules = ['TOPTransformerBlock']
     _supports_cache_class = True
 
     def __init__(self, *inputs, **kwargs):
@@ -149,7 +150,7 @@ class MTPTransformerPreTrainedModel(PreTrainedModel):
             elif hasattr(module, 'down_proj'):
                 p = module.down_proj.weight
             if p is not None:
-                # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
+                # Special Scaled Initialization --> There are 2 Layer Norms per TOPTransformer Block
                 # Following Pytorch init, except scale by 1/sqrt(2 * n_layer)
                 # We need to reinit p since this code could be called multiple times
                 # Having just p *= scale would repeatedly scale it down
@@ -158,18 +159,18 @@ class MTPTransformerPreTrainedModel(PreTrainedModel):
                     p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
 
 
-class MTPTransformerModel(MTPTransformerPreTrainedModel):
+class TOPTransformerModel(TOPTransformerPreTrainedModel):
 
     def __init__(
         self,
-        config: MTPTransformerConfig
-    ) -> MTPTransformerModel:
+        config: TOPTransformerConfig
+    ) -> TOPTransformerModel:
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList([MTPTransformerBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([TOPTransformerBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
         self.norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
 
         self.gradient_checkpointing = False
@@ -196,7 +197,7 @@ class MTPTransformerModel(MTPTransformerPreTrainedModel):
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         if output_attentions:
             warnings.warn(
-                "`TransformerModel` does not support output attention weights now, so `output_attentions` is set to `False`."
+                "`TOPTransformerModel` does not support output attention weights now, so `output_attentions` is set to `False`."
             )
             output_attentions = False
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -279,15 +280,19 @@ class MTPTransformerModel(MTPTransformerPreTrainedModel):
         )
 
 
-class MTPTransformerForCausalLM(MTPTransformerPreTrainedModel, GenerationMixin):
+class TOPTransformerForCausalLM(TOPTransformerPreTrainedModel, GenerationMixin):
 
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
         super().__init__(config)
-        self.model = MTPTransformerModel(config)
+        self.model = TOPTransformerModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        if config.use_top_loss:
+            self.top_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+            self.top_criterion = FusedLinearListNetLoss()
+            self.top_window_size = config.top_window_size
         self.criterion = None
         self.pad_token_id = config.pad_token_id
 
@@ -384,6 +389,8 @@ class MTPTransformerForCausalLM(MTPTransformerPreTrainedModel, GenerationMixin):
         logits = None if fuse_linear_and_cross_entropy else self.lm_head(hidden_states[:, -logits_to_keep:])
 
         loss = None
+        ntp_loss = None
+        top_loss = None
         if labels is not None:
             if getattr(self, 'criterion', None) is None:
                 if fuse_linear_and_cross_entropy:
@@ -397,17 +404,33 @@ class MTPTransformerForCausalLM(MTPTransformerPreTrainedModel, GenerationMixin):
             # Enable model parallelism
             labels = labels.to(hidden_states.device)
             labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
+            ntp_labels = labels[..., :hidden_states.shape[1]].contiguous()
             if fuse_linear_and_cross_entropy:
-                loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
+                ntp_loss = criterion(hidden_states, ntp_labels, self.lm_head.weight, self.lm_head.bias)
             else:
-                loss = criterion(logits.view(labels.numel(), -1), labels.reshape(-1))
+                ntp_loss = criterion(logits.view(ntp_labels.numel(), -1), ntp_labels.reshape(-1))
+
+            if self.config.use_top_loss:
+                top_labels = seq_to_top(labels, vocab_size=self.vocab_size, window_size=self.top_window_size, pad_token_id=self.pad_token_id).contiguous()
+                top_loss = self.top_criterion(hidden_states, top_labels, self.top_head.weight, self.top_head.bias)
+                # print(f"NTP Loss: {ntp_loss.item()}, TOP Loss: {top_loss.item()}")
+                # For debugging, get the index where the top label is the highest and print the corresponding logits
+                # idx_max = torch.argmax(top_labels.view(-1, self.vocab_size), dim=1)
+                # # Print the labels and logits at that index
+                # print(f"Labels: {top_labels.view(-1, self.vocab_size)[0, idx_max[0]-3:idx_max[0]+3]}")
+                # print(f"Logits: {F.sigmoid(top_logits).view(-1, self.vocab_size)[0, idx_max[0]-3:idx_max[0]+3]}")
+                loss = ntp_loss + top_loss
+            else:
+                loss = ntp_loss
 
         if not return_dict:
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
 
-        return MTPLMOutputWithPast(
+        return TOPLMOutputWithPast(
             loss=loss,
+            ntp_loss=ntp_loss,
+            top_loss=top_loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
