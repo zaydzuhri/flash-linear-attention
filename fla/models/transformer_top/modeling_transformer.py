@@ -21,7 +21,7 @@ import triton
 import triton.language as tl
 
 from fla.layers.attn import Attention
-from fla.models.transformer.configuration_transformer import TOPTransformerConfig
+from fla.models.transformer_top.configuration_transformer import TOPTransformerConfig
 from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, FusedLinearListNetLoss
 from fla.modules import GatedMLP as TransformerMLP
