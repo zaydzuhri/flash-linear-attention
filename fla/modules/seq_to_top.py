@@ -68,7 +68,7 @@ def seq_to_top(
     seq: torch.Tensor, 
     vocab_size: int, 
     window_size: int,
-    pad_token_id: int = -100
+    pad_token_id: int
 ) -> torch.Tensor:
     """
     Triton-optimized top sequence processing with autotuned block size.
@@ -79,6 +79,9 @@ def seq_to_top(
     :param pad_token_id: Padding token ID
     :return: Tensor of shape (B, T, V) with window_size - distance for tokens in window, else -inf
     """
+    if pad_token_id is None:
+        pad_token_id = -100
+        
     B, T_total = seq.shape
     T = T_total - window_size
     
