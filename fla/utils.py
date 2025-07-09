@@ -123,7 +123,9 @@ def _cpu_device_warning():
 @lru_cache(maxsize=None)
 def get_multiprocessor_count(tensor_idx: int = 0) -> int:
     try:
-        return triton.runtime.driver.active.utils.get_device_properties(tensor_idx)['multiprocessor_count']
+        # Only works if Homogeneous hardware
+        # TEMPORARY FIX since old version introduce graph break
+        return torch.cuda.get_device_properties().multi_processor_count
     except BaseException:
         _cpu_device_warning()
         return -1
