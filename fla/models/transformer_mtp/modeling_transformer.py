@@ -385,14 +385,14 @@ class MTPTransformerModel(MTPTransformerPreTrainedModel):
         trunk = hidden_states
 
         n_heads_to_use = self.config.n_future_tokens if return_all_heads else 1
-        prediction_heads = self.extra_heads
+        prediction_heads_to_use = self.extra_heads[:n_heads_to_use]
 
         if use_custom_backward and self.training:
             # all_logits = SequentialHeadsCustomBackward.apply(trunk, self.lm_head, *prediction_heads)
             hidden_states = trunk # return hidden states and apply custom backward on the MTPTransformersLM
         else:
             latents = []
-            for i, layer in enumerate(prediction_heads):
+            for i, layer in enumerate(prediction_heads_to_use):
                 if output_hidden_states:
                     all_hidden_states += (hidden_states,)
 
@@ -539,19 +539,26 @@ class MTPTransformerForCausalLM(MTPTransformerPreTrainedModel, GenerationMixin):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            return_all_heads=self.training,
             **kwargs
         )
 
         hidden_states = outputs[0] # (B, T, n_heads_to_use, D)
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
 
-        use_custom_backward = self.config.use_custom_backward and self.training
-        if use_custom_backward and self.training:
-            all_logits = SequentialHeadsCustomBackward.apply(
-                hidden_states, self.lm_head, self.model.norm, logits_to_keep, *self.model.extra_heads
-            )
+        all_logits = None
+        if not self.training:
+            if hidden_states.dim() == 4:
+                hidden_states = hidden_states.squeeze(-2) # Remove the n_heads_to_use dimension if not training
+            all_logits = self.lm_head(hidden_states)
         else:
-            all_logits = None if fuse_linear_and_cross_entropy else self.lm_head(hidden_states[:, -logits_to_keep:])
+            fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
+            use_custom_backward = self.config.use_custom_backward and self.training
+            if use_custom_backward:
+                all_logits = SequentialHeadsCustomBackward.apply(
+                    hidden_states, self.lm_head, self.model.norm, logits_to_keep, *self.model.extra_heads
+                )
+            else:
+                all_logits = None if fuse_linear_and_cross_entropy else self.lm_head(hidden_states[:, -logits_to_keep:])
 
         loss = None
         if labels is not None:
