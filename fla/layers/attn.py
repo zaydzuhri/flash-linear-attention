@@ -23,9 +23,14 @@ try:
     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input
 except ImportError:
     warnings.warn(
-        "Flash Attention is not installed. Please install it via `pip install flash-attn --no-build-isolation`",
+        "Flash Attention is not installed. Please install it via `pip install flash-attn --no-build-isolation`."
+        " Falling back to use SDPA's attention implementation.",
         category=ImportWarning
     )
+    flash_attn_func = None
+
+import os
+if os.getenv("FLASH_ATTENTION_DISABLE", "0") == "1":
     flash_attn_func = None
 
 logger = logging.get_logger(__name__)
@@ -132,40 +137,72 @@ class Attention(nn.Module):
                 k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
                 v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
 
-        if flash_attn_func is None:
-            raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")
-
         # Contains at least one padding token in the sequence
         if attention_mask is not None:
-            q, k, v, indices_q, cu_seq_lens, max_seq_lens = self._upad_input(q, k, v, attention_mask, q_len)
-            cu_seqlens_q, cu_seqlens_k = cu_seq_lens
-            max_seqlen_q, max_seqlen_k = max_seq_lens
-            o = flash_attn_varlen_func(
-                q, k, v,
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_k=cu_seqlens_k,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_seqlen_k,
-                causal=True,
-                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
-            )
-            o = pad_input(o, indices_q, batch_size, q_len)
+            if flash_attn_func is not None:
+                q, k, v, indices_q, cu_seq_lens, max_seq_lens = self._upad_input(q, k, v, attention_mask, q_len)
+                cu_seqlens_q, cu_seqlens_k = cu_seq_lens
+                max_seqlen_q, max_seqlen_k = max_seq_lens
+                o = flash_attn_varlen_func(
+                    q, k, v,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_k=max_seqlen_k,
+                    causal=True,
+                    window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
+                ) # B S H D
+                o = pad_input(o, indices_q, batch_size, q_len) # B S H D
+            else:
+                attention_mask = attention_mask.bool()
+                q = rearrange(q, 'b s h d -> b h s d')  # B H S D
+                k = rearrange(k, 'b s h d -> b h s d')  # B H S D
+                v = rearrange(v, 'b s h d -> b h s d')  # B H S D
+                o = F.scaled_dot_product_attention(
+                    q, k, v,
+                    attn_mask=attention_mask,
+                    dropout_p=0.0,
+                    is_causal=False,
+                ) # B, H, S, D
+                o = rearrange(o, 'b h s d -> b s h d')
         elif cu_seqlens is not None:
-            o = flash_attn_varlen_func(
-                q.squeeze(0), k.squeeze(0), v.squeeze(0),
-                cu_seqlens_q=cu_seqlens,
-                cu_seqlens_k=cu_seqlens,
-                max_seqlen_q=max_seqlen,
-                max_seqlen_k=max_seqlen,
-                causal=True,
-                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
-            ).unsqueeze(0)
+            if flash_attn_func is not None:
+                o = flash_attn_varlen_func(
+                    q.squeeze(0), k.squeeze(0), v.squeeze(0),
+                    cu_seqlens_q=cu_seqlens,
+                    cu_seqlens_k=cu_seqlens,
+                    max_seqlen_q=max_seqlen,
+                    max_seqlen_k=max_seqlen,
+                    causal=True,
+                    window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
+                ).unsqueeze(0)
+            else:
+                # o = F.scaled_dot_product_attention(
+                #     q.squeeze(0), k.squeeze(0), v.squeeze(0),
+                #     dropout_p=0.0,
+                #     is_causal=True
+                # ).unsqueeze(0)
+                raise NotImplementedError(
+                    "SDPA does not support variable length inputs with cu_seqlens. "
+                    "Please use flash_attn_func for variable length inputs."
+                )
         else:
-            o = flash_attn_func(
-                q, k, v,
-                causal=True,
-                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
-            )
+            if flash_attn_func is not None:
+                o = flash_attn_func(
+                    q, k, v,
+                    causal=True,
+                    window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
+                )
+            else:
+                q = rearrange(q, 'b s h d -> b h s d')  # B H S D
+                k = rearrange(k, 'b s h d -> b h s d')  # B H S D
+                v = rearrange(v, 'b s h d -> b h s d')  # B H S D
+                o = F.scaled_dot_product_attention(
+                    q, k, v,
+                    dropout_p=0.0,
+                    is_causal=True
+                )
+                o = rearrange(o, 'b h s d -> b s h d')
         o = o.reshape(batch_size, q_len, -1)
         o = self.o_proj(o)
 
@@ -198,6 +235,6 @@ class Attention(nn.Module):
         else:
             # The -q_len: slice assumes left padding.
             attention_mask = attention_mask[:, -q_len:]
-            q, indices_q, cu_seqlens_q, max_seqlen_q = unpad_input(q, attention_mask)
+            q, indices_q, cu_seqlens_q, max_seqlen_q, *_  = unpad_input(q, attention_mask)
 
         return q, k, v, indices_q, (cu_seqlens_q, cu_seqlens_k), (max_seqlen_q, max_seqlen_k)
