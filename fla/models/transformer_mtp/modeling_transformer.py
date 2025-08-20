@@ -282,7 +282,7 @@ class MTPTransformerModel(MTPTransformerPreTrainedModel):
 
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList([MTPTransformerBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers - config.n_future_tokens)])
-        self.extra_heads = nn.ModuleList([MTPTransformerBlock(config, layer_idx) for layer_idx in range(config.n_future_tokens)])
+        self.extra_heads = nn.ModuleList([MTPTransformerBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers - config.n_future_tokens, config.num_hidden_layers)])
         self.norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
 
         self.gradient_checkpointing = False
@@ -418,7 +418,7 @@ class MTPTransformerModel(MTPTransformerPreTrainedModel):
                 hidden_states = layer_outputs[0]
                 latents.append(hidden_states)
 
-                if use_cache:
+                if use_cache and i == 0:
                     next_cache = layer_outputs[2 if output_attentions else 1]
                 
                 if output_attentions:
