@@ -35,6 +35,11 @@ if TYPE_CHECKING:
 logger = logging.get_logger(__name__)
 
 
+@dataclass
+class DSMTPLMOutputWithPast(CausalLMOutputWithPast):
+    ntp_loss: Optional[torch.FloatTensor] = None
+    mtp_loss: Optional[torch.FloatTensor] = None
+
 class DSMTPTransformerBlock(nn.Module):
 
     def __init__(self, config: DSMTPTransformerConfig, layer_idx: int):
@@ -386,7 +391,7 @@ class DSMTPTransformerForCausalLM(DSMTPTransformerPreTrainedModel, GenerationMix
         logits_to_keep: Optional[int] = 0,
         **kwargs: Unpack[Any]
     ) -> Union[Tuple, CausalLMOutputWithPast]:
-        input_ids, labels = seq_to_dsmtp(input_ids, labels, n_future_tokens=self.config.n_future_tokens, model_seq_len=self.config.max_position_embeddings)
+        input_ids, all_labels = seq_to_dsmtp(input_ids, labels, n_future_tokens=self.config.n_future_tokens, model_seq_len=self.config.max_position_embeddings)
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -406,12 +411,17 @@ class DSMTPTransformerForCausalLM(DSMTPTransformerPreTrainedModel, GenerationMix
         )
 
         hidden_states = outputs[0]
+        n_heads_prediction = self.config.n_future_tokens
 
         fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
-        logits = None if fuse_linear_and_cross_entropy else self.lm_head(hidden_states)
+        all_logits = None if fuse_linear_and_cross_entropy else self.lm_head(hidden_states)
 
         loss = None
         if labels is not None:
+            B, T, n_heads, D = hidden_states.shape
+            loss = torch.zeros(1, device=hidden_states.device)
+            ntp_loss = torch.zeros(1, device=hidden_states.device)
+            mtp_loss = torch.zeros(1, device=hidden_states.device)
             if getattr(self, 'criterion', None) is None:
                 if fuse_linear_and_cross_entropy:
                     criterion = FusedLinearCrossEntropyLoss()
@@ -422,18 +432,30 @@ class DSMTPTransformerForCausalLM(DSMTPTransformerPreTrainedModel, GenerationMix
             else:
                 criterion = self.criterion
             
-            B, T, n_heads, V = logits.shape
-            logits_flat = logits.view(B * T * n_heads, V)
-            labels_flat = labels.permute(0, 2, 1).reshape(-1)
-            loss = criterion(logits_flat, labels_flat)
+            # Logits shape is 
+            labels = labels.to(hidden_states.device)
+            for i in range(n_heads_prediction):
+                labels = all_labels[:, i, :]
+                if fuse_linear_and_cross_entropy:
+                    current_loss = criterion(hidden_states[:, :, i, :], labels.contiguous(), self.lm_head.weight, self.lm_head.bias)
+                else:
+                    logits = all_logits[:, :, i, :]
+                    current_loss = criterion(logits.view(labels.numel(), -1), labels.reshape(-1))
+                if i == 0:
+                    ntp_loss = current_loss
+                else:
+                    mtp_loss += current_loss
+                loss += current_loss
 
         if not return_dict:
-            output = (logits,) + outputs[1:]
+            output = (all_logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
 
-        return CausalLMOutputWithPast(
+        return DSMTPLMOutputWithPast(
             loss=loss,
-            logits=logits,
+            ntp_loss=ntp_loss if loss is not None else None,
+            mtp_loss=mtp_loss if loss is not None else None,
+            logits=all_logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
