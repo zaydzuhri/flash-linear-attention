@@ -26,6 +26,7 @@ from fla.models.samba import SambaConfig, SambaForCausalLM, SambaModel
 from fla.models.transformer import TransformerConfig, TransformerForCausalLM, TransformerModel
 from fla.models.transformer_top import TOPTransformerConfig, TOPTransformerForCausalLM, TOPTransformerModel
 from fla.models.transformer_mtp import MTPTransformerConfig, MTPTransformerForCausalLM, MTPTransformerModel
+from fla.models.transformer_dsmtp import DSMTPTransformerConfig, DSMTPTransformerForCausalLM, DSMTPTransformerModel
 
 __all__ = [
     'ABCConfig', 'ABCForCausalLM', 'ABCModel',
@@ -49,5 +50,6 @@ __all__ = [
     'TransformerConfig', 'TransformerForCausalLM', 'TransformerModel',
     'TOPTransformerConfig', 'TOPTransformerForCausalLM', 'TOPTransformerModel',
     'MTPTransformerConfig', 'MTPTransformerForCausalLM', 'MTPTransformerModel',
+    'DSMTPTransformerConfig', 'DSMTPTransformerForCausalLM', 'DSMTPTransformerModel',
     'GatedDeltaProductConfig', 'GatedDeltaProductForCausalLM', 'GatedDeltaProductModel',
 ]
