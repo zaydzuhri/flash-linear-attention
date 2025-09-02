@@ -270,13 +270,12 @@ class DSMTPTransformerModel(DSMTPTransformerPreTrainedModel):
             if output_attentions:
                 all_attns += (layer_outputs[1],)
 
-        hidden_states = self.norm(hidden_states)
         
         latents = []
         for i, block in enumerate(self.extra_heads):
             if i > 0:
                 hidden_states = self.norms_1[i](hidden_states)
-                new_input = self.norms_2[i](inputs_embeds[:, i, :, :].detach())
+                new_input = self.norms_2[i](inputs_embeds[:, i, :, :])
                 hidden_states = torch.cat((hidden_states, new_input), dim=-1)
                 hidden_states = self.projection_head[i](hidden_states)
             
@@ -291,7 +290,8 @@ class DSMTPTransformerModel(DSMTPTransformerPreTrainedModel):
             hidden_states = layer_outputs[0]
             latents.append(hidden_states)
         
-        hidden_states = torch.stack(latents, dim=-2)
+        hidden_states = torch.stack(latents, dim=1)
+        hidden_states = self.norm(hidden_states)
 
         # add hidden states from the last decoder layer
         if output_hidden_states:
@@ -418,7 +418,7 @@ class DSMTPTransformerForCausalLM(DSMTPTransformerPreTrainedModel, GenerationMix
 
         loss = None
         if labels is not None:
-            B, T, n_heads, D = hidden_states.shape
+            B, n_heads, T, D = hidden_states.shape
             loss = torch.zeros(1, device=hidden_states.device)
             ntp_loss = torch.zeros(1, device=hidden_states.device)
             mtp_loss = torch.zeros(1, device=hidden_states.device)
@@ -437,10 +437,10 @@ class DSMTPTransformerForCausalLM(DSMTPTransformerPreTrainedModel, GenerationMix
             for i in range(n_heads_prediction):
                 current_labels = all_labels[:, i, :]
                 if fuse_linear_and_cross_entropy:
-                    current_loss = criterion(hidden_states[:, :, i, :], current_labels.contiguous(), self.lm_head.weight, self.lm_head.bias)
+                    current_loss = criterion(hidden_states[:, i, :, :].contiguous(), current_labels.contiguous(), self.lm_head.weight, self.lm_head.bias)
                 else:
-                    logits = all_logits[:, :, i, :]
-                    current_loss = criterion(logits.view(labels.numel(), -1), current_labels.reshape(-1))
+                    logits = all_logits[:, i, :, :]
+                    current_loss = criterion(logits.contiguous().view(current_labels.numel(), -1), current_labels.reshape(-1))
                 if i == 0:
                     ntp_loss = current_loss
                 else:
