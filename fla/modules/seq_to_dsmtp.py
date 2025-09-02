@@ -12,7 +12,7 @@ def seq_to_dsmtp(
 
     windows = labels.unfold(dimension=1, size=n_future_tokens + 1, step=1)
 
-    all_targets = windows[:, :, :-1]
+    all_targets = windows[:, :, 1:]
 
     output_targets = all_targets[:, :model_seq_len, :]
 
