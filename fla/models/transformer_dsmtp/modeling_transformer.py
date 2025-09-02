@@ -433,14 +433,14 @@ class DSMTPTransformerForCausalLM(DSMTPTransformerPreTrainedModel, GenerationMix
                 criterion = self.criterion
             
             # Logits shape is 
-            labels = labels.to(hidden_states.device)
+            all_labels = all_labels.to(hidden_states.device)
             for i in range(n_heads_prediction):
-                labels = all_labels[:, i, :]
+                current_labels = all_labels[:, i, :]
                 if fuse_linear_and_cross_entropy:
-                    current_loss = criterion(hidden_states[:, :, i, :], labels.contiguous(), self.lm_head.weight, self.lm_head.bias)
+                    current_loss = criterion(hidden_states[:, :, i, :], current_labels.contiguous(), self.lm_head.weight, self.lm_head.bias)
                 else:
                     logits = all_logits[:, :, i, :]
-                    current_loss = criterion(logits.view(labels.numel(), -1), labels.reshape(-1))
+                    current_loss = criterion(logits.view(labels.numel(), -1), current_labels.reshape(-1))
                 if i == 0:
                     ntp_loss = current_loss
                 else:
