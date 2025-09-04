@@ -413,15 +413,13 @@ class TOPTransformerForCausalLM(TOPTransformerPreTrainedModel, GenerationMixin):
             if self.config.use_top_loss:
                 top_labels = seq_to_top(labels, vocab_size=self.vocab_size, window_size=self.top_window_size, pad_token_id=self.pad_token_id).contiguous()
                 top_loss = self.top_criterion(hidden_states, top_labels, self.top_head.weight, self.top_head.bias)
-                # print(f"NTP Loss: {ntp_loss.item()}, TOP Loss: {top_loss.item()}")
-                # For debugging, get the index where the top label is the highest and print the corresponding logits
-                # idx_max = torch.argmax(top_labels.view(-1, self.vocab_size), dim=1)
-                # # Print the labels and logits at that index
-                # print(f"Labels: {top_labels.view(-1, self.vocab_size)[0, idx_max[0]-3:idx_max[0]+3]}")
-                # print(f"Logits: {F.sigmoid(top_logits).view(-1, self.vocab_size)[0, idx_max[0]-3:idx_max[0]+3]}")
                 loss = ntp_loss + top_loss
             else:
                 loss = ntp_loss
+
+        if kwargs['output_top_logits']:
+            top_logits = self.top_head(hidden_states[:, -logits_to_keep:])
+            logits = (logits, top_logits)
 
         if not return_dict:
             output = (logits,) + outputs[1:]
