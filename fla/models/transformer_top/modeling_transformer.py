@@ -417,7 +417,7 @@ class TOPTransformerForCausalLM(TOPTransformerPreTrainedModel, GenerationMixin):
             else:
                 loss = ntp_loss
 
-        if kwargs['output_top_logits']:
+        if 'output_top_logits' in kwargs and kwargs['output_top_logits']:
             top_logits = self.top_head(hidden_states[:, -logits_to_keep:])
             logits = (logits, top_logits)
 
