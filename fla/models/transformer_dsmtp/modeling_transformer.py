@@ -273,22 +273,23 @@ class DSMTPTransformerModel(DSMTPTransformerPreTrainedModel):
         
         latents = []
         for i, block in enumerate(self.extra_heads):
-            if i > 0:
-                hidden_states = self.norms_1[i](hidden_states)
-                new_input = self.norms_2[i](inputs_embeds[:, i, :, :])
-                hidden_states = torch.cat((hidden_states, new_input), dim=-1)
-                hidden_states = self.projection_head[i](hidden_states)
-            
-            layer_outputs = block(
-                hidden_states,
-                attention_mask=attention_mask,
-                past_key_values=None, # No cache for extra heads
-                output_attentions=output_attentions,
-                use_cache=False,
-                **kwargs
-            )
-            hidden_states = layer_outputs[0]
-            latents.append(hidden_states)
+            if i < input_ids.shape[1]:
+                if i > 0:
+                    hidden_states = self.norms_1[i](hidden_states)
+                    new_input = self.norms_2[i](inputs_embeds[:, i, :, :])
+                    hidden_states = torch.cat((hidden_states, new_input), dim=-1)
+                    hidden_states = self.projection_head[i](hidden_states)
+                
+                layer_outputs = block(
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    past_key_values=None, # No cache for extra heads
+                    output_attentions=output_attentions,
+                    use_cache=False,
+                    **kwargs
+                )
+                hidden_states = layer_outputs[0]
+                latents.append(hidden_states)
         
         hidden_states = torch.stack(latents, dim=1)
         hidden_states = self.norm(hidden_states)
@@ -391,7 +392,7 @@ class DSMTPTransformerForCausalLM(DSMTPTransformerPreTrainedModel, GenerationMix
         logits_to_keep: Optional[int] = 0,
         **kwargs: Unpack[Any]
     ) -> Union[Tuple, CausalLMOutputWithPast]:
-        input_ids, all_labels = seq_to_dsmtp(input_ids, labels, n_future_tokens=self.config.n_future_tokens, model_seq_len=self.config.max_position_embeddings)
+        input_ids, all_labels = seq_to_dsmtp(input_ids, labels, n_future_tokens=self.config.n_future_tokens if labels is not None else 1, model_seq_len=input_ids.shape[1])
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -446,6 +447,8 @@ class DSMTPTransformerForCausalLM(DSMTPTransformerPreTrainedModel, GenerationMix
                 else:
                     mtp_loss += current_loss
                 loss += current_loss
+        else:
+            all_logits = all_logits.squeeze(1)  # (B, T, vocab_size)
 
         if not return_dict:
             output = (all_logits,) + outputs[1:]

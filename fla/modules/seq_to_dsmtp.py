@@ -6,6 +6,9 @@ def seq_to_dsmtp(
     model_seq_len: int,
     n_future_tokens: int
 ) -> torch.Tensor:
+    if labels is None:
+        return input_ids.unsqueeze(1), None
+    
     B, total_len = labels.shape
     assert total_len >= model_seq_len + n_future_tokens, \
         "long_input_ids must be at least model_seq_len + n_future_tokens long."
