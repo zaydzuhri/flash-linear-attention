@@ -18,7 +18,8 @@ from fla.layers import (
     NativeSparseAttention,
     ReBasedLinearAttention,
     RWKV6Attention,
-    RWKV7Attention
+    RWKV7Attention,
+    Monoblock,
 )
 from fla.models import (
     ABCForCausalLM,
@@ -51,7 +52,9 @@ from fla.models import (
     RWKV7ForCausalLM,
     RWKV7Model,
     TransformerForCausalLM,
-    TransformerModel
+    TransformerModel,
+    MonoTransformerForCausalLM,
+    MonoTransformerModel,
 )
 
 __all__ = [
@@ -73,6 +76,7 @@ __all__ = [
     'ReBasedLinearAttention',
     'RWKV6Attention',
     'RWKV7Attention',
+    'Monoblock',
     'ABCForCausalLM',
     'ABCModel',
     'BitNetForCausalLM',
@@ -105,6 +109,8 @@ __all__ = [
     'RWKV7Model',
     'TransformerForCausalLM',
     'TransformerModel',
+    'MonoTransformerForCausalLM',
+    'MonoTransformerModel',
 ]
 
 __version__ = '0.1.2'
