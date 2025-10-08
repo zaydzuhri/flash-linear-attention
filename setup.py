@@ -12,20 +12,20 @@ with open('README.md') as f:
 
 
 def get_package_version():
-    with open(Path(os.path.dirname(os.path.abspath(__file__))) / 'flame' / '__init__.py') as f:
+    with open(Path(os.path.dirname(os.path.abspath(__file__))) / 'fla' / '__init__.py') as f:
         version_match = re.search(r"^__version__\s*=\s*(.*)$", f.read(), re.MULTILINE)
     return ast.literal_eval(version_match.group(1))
 
 
 setup(
-    name='flame',
+    name='flash-linear-attention',
     version=get_package_version(),
-    description='A minimal training framework for scaling FLA models',
+    description='Fast Triton-based implementations of causal linear attention',
     long_description=long_description,
     long_description_content_type='text/markdown',
     author='Songlin Yang, Yu Zhang',
     author_email='yangsl66@mit.edu, yzhang.cs@outlook.com',
-    url='https://github.com/fla-org/flame',
+    url='https://github.com/fla-org/flash-linear-attention',
     packages=find_packages(),
     license='MIT',
     classifiers=[
@@ -36,16 +36,13 @@ setup(
     ],
     python_requires='>=3.10',
     install_requires=[
-        'torch==2.6',
-        'torchdata',
+        'torch==2.6.0',
         'transformers==4.51.3',
-        'triton>=3.0',
         'datasets>=3.3.0',
         'einops',
-        'ninja',
-        'wandb',
-        'tiktoken',
-        'tensorboard',
-        'python-dotenv'
+        'ninja'
     ],
+    extras_require={
+        'conv1d': ['causal-conv1d>=1.4.0']
+    }
 )
