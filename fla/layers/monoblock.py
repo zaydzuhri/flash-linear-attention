@@ -8,12 +8,12 @@ from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import torch.utils.checkpoint
 from einops import rearrange
 from transformers.utils import logging
 
-from fla.layers.utils import pad_input, unpad_input
 from fla.modules import RMSNorm, RotaryEmbedding
-from fla.ops.utils.index import prepare_lens_from_mask
 from fla.modules.activations import swiglu, swiglu_linear
 
 if TYPE_CHECKING:
@@ -23,7 +23,7 @@ try:
     from flex_head_fa import flash_attn_func, flash_attn_varlen_func
 except ImportError:
     warnings.warn(
-        "Flex Head Flash Attention is not installed. Please install it via `pip install flash-attn --no-build-isolation`",
+        "Flex Head Flash Attention is not installed. Please install it via `pip install flex-head-fa --no-build-isolation`",
         category=ImportWarning
     )
     flash_attn_func = None
@@ -60,8 +60,9 @@ class Monoblock(nn.Module):
         if hidden_ratio is None:
             hidden_ratio = 4
         if intermediate_size is None:
-            intermediate_size = int(hidden_size * hidden_ratio * 2 / 3)
-            intermediate_size = 256 * ((intermediate_size + 256 - 1) // 256)
+            # intermediate_size = int(hidden_size * hidden_ratio * 2 / 3)
+            # intermediate_size = 256 * ((intermediate_size + 256 - 1) // 256)
+            intermediate_size = hidden_size * hidden_ratio
         self.hidden_ratio = hidden_ratio
         self.intermediate_size = intermediate_size
         self.fuse_swiglu = fuse_swiglu
@@ -73,7 +74,7 @@ class Monoblock(nn.Module):
         self.num_kv_groups = num_heads // self.num_kv_heads
         self.head_dim = self.hidden_size // self.num_heads
         self.k_dim = self.num_kv_heads * self.head_dim
-        self.v_dim = self.num_kv_heads * self.head_dim * self.hidden_ratio
+        self.v_dim = self.intermediate_size
         self.qkv_bias = qkv_bias
         self.qk_norm = qk_norm
 
@@ -81,9 +82,6 @@ class Monoblock(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
         self.layer_idx = layer_idx
-
-        if flash_attn_func is None:
-            raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")
 
         self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=self.qkv_bias)
         self.k_proj = nn.Linear(self.hidden_size, self.k_dim, bias=self.qkv_bias)
@@ -120,7 +118,7 @@ class Monoblock(nn.Module):
 
         q = rearrange(self.q_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
         k = rearrange(self.k_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
-        v = rearrange(self.v_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim * self.hidden_ratio)
+        v = rearrange(self.v_proj(hidden_states), '... (h d) -> ... h d', d=self.v_dim // self.num_kv_heads)
         g = self.g_proj(hidden_states)
 
         if self.qk_norm:
@@ -136,7 +134,7 @@ class Monoblock(nn.Module):
 
             if attention_mask is not None:
                 # to deliminate the offsets of padding tokens
-                seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
+                seqlen_offset = seqlen_offset + attention_mask.sum(-1) - attention_mask.shape[-1]
                 max_seqlen = q.shape[1] + max(seqlen_offset)
 
         if self.max_position_embeddings is not None:
@@ -156,12 +154,13 @@ class Monoblock(nn.Module):
                 k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
                 v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
 
+        if flash_attn_func is None:
+            raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")
+
         # Contains at least one padding token in the sequence
         if attention_mask is not None:
-            if q.shape[1] == 1 and self.window_size is not None:
-                attention_mask = attention_mask[:, -self.window_size:]
-            q, (k, v), indices_q, cu_seqlens, max_seq_lens = unpad_input(q, (k, v), attention_mask, q_len)
-            cu_seqlens_q, cu_seqlens_k = cu_seqlens
+            q, k, v, indices_q, cu_seq_lens, max_seq_lens = self._upad_input(q, k, v, attention_mask, q_len)
+            cu_seqlens_q, cu_seqlens_k = cu_seq_lens
             max_seqlen_q, max_seqlen_k = max_seq_lens
             o = flash_attn_varlen_func(
                 q, k, v,
@@ -200,3 +199,31 @@ class Monoblock(nn.Module):
             attentions = None
 
         return o, attentions, past_key_values
+
+    def _upad_input(self, q, k, v, attention_mask, q_len):
+        batch_size, seq_len, num_key_value_heads, head_dim = k.shape
+        cache_mask = attention_mask[:, -seq_len:]
+        seqlens = cache_mask.sum(-1, dtype=torch.int32)
+        indices_k = torch.nonzero(cache_mask.flatten(), as_tuple=False).flatten()
+        max_seqlen_k = seqlens.max().item()
+        cu_seqlens_k = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
+
+        k = index_first_axis(k.reshape(batch_size * seq_len, num_key_value_heads, head_dim), indices_k)
+        v = index_first_axis(v.reshape(batch_size * seq_len, num_key_value_heads, head_dim), indices_k)
+        if q_len == seq_len:
+            q = index_first_axis(q.reshape(batch_size * seq_len, self.num_heads, head_dim), indices_k)
+            cu_seqlens_q = cu_seqlens_k
+            max_seqlen_q = max_seqlen_k
+            indices_q = indices_k
+        elif q_len == 1:
+            max_seqlen_q = 1
+            # There is a memcpy here, that is very bad.
+            cu_seqlens_q = torch.arange(batch_size + 1, dtype=torch.int32, device=q.device)
+            indices_q = cu_seqlens_q[:-1]
+            q = q.squeeze(1)
+        else:
+            # The -q_len: slice assumes left padding.
+            attention_mask = attention_mask[:, -q_len:]
+            q, indices_q, cu_seqlens_q, max_seqlen_q = unpad_input(q, attention_mask)
+
+        return q, k, v, indices_q, (cu_seqlens_q, cu_seqlens_k), (max_seqlen_q, max_seqlen_k)

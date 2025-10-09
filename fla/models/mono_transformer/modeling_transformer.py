@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+import torch.utils.checkpoint
+from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
@@ -15,25 +17,19 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.monoblock import Monoblock
 from fla.models.mono_transformer.configuration_transformer import MonoTransformerConfig
-from fla.models.utils import Cache, FLAGenerationMixin
+from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as TransformerMLP
 from fla.modules import RMSNorm
-from fla.modules.l2warp import l2_warp
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
 
-try:
-    from transformers.modeling_layers import GradientCheckpointingLayer
-except ImportError:
-    from fla.models.modeling_layers import GradientCheckpointingLayer
-
 logger = logging.get_logger(__name__)
 
 
-class MonoTransformerBlock(GradientCheckpointingLayer):
+class MonoTransformerBlock(nn.Module):
 
     def __init__(self, config: MonoTransformerConfig, layer_idx: int):
         super().__init__()
@@ -45,6 +41,7 @@ class MonoTransformerBlock(GradientCheckpointingLayer):
         self.monoblock = Monoblock(
             hidden_size=config.hidden_size,
             hidden_ratio=config.hidden_ratio,
+            intermediate_size=config.intermediate_size,
             num_heads=config.num_heads,
             num_kv_heads=config.num_kv_heads,
             qkv_bias=config.qkv_bias,
@@ -66,7 +63,7 @@ class MonoTransformerBlock(GradientCheckpointingLayer):
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
 
         residual = hidden_states
-        hidden_states = self.attn_norm(hidden_states)
+        hidden_states = self.norm(hidden_states)
         hidden_states, attentions, past_key_values = self.monoblock(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -199,6 +196,13 @@ class MonoTransformerModel(MonoTransformerPreTrainedModel):
         # embed positions
         hidden_states = inputs_embeds
 
+        if self.gradient_checkpointing and self.training:
+            if use_cache:
+                logger.warning_once(
+                    "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
+                )
+                use_cache = False
+
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
         next_cache = None
@@ -207,14 +211,25 @@ class MonoTransformerModel(MonoTransformerPreTrainedModel):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            layer_outputs = layer(
-                hidden_states,
-                attention_mask=attention_mask,
-                past_key_values=past_key_values,
-                output_attentions=output_attentions,
-                use_cache=use_cache,
-                **kwargs
-            )
+            if self.gradient_checkpointing and self.training:
+                layer_outputs = self._gradient_checkpointing_func(
+                    layer.__call__,
+                    hidden_states,
+                    attention_mask,
+                    past_key_values,
+                    output_attentions,
+                    use_cache,
+                    **kwargs
+                )
+            else:
+                layer_outputs = layer(
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    past_key_values=past_key_values,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                    **kwargs
+                )
 
             hidden_states = layer_outputs[0]
 
@@ -241,7 +256,7 @@ class MonoTransformerModel(MonoTransformerPreTrainedModel):
         )
 
 
-class MonoTransformerForCausalLM(MonoTransformerPreTrainedModel, FLAGenerationMixin):
+class MonoTransformerForCausalLM(MonoTransformerPreTrainedModel, GenerationMixin):
 
     _tied_weights_keys = ["lm_head.weight"]
 
@@ -272,6 +287,40 @@ class MonoTransformerForCausalLM(MonoTransformerPreTrainedModel, FLAGenerationMi
 
     def get_decoder(self):
         return self.model
+
+    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
+    def prepare_inputs_for_generation(
+        self,
+        input_ids: torch.LongTensor = None,
+        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        use_cache: bool = True,
+        logits_to_keep: Optional[int] = None,
+        **kwargs
+    ):
+        # only last token for `inputs_ids` if the `past_key_values` is not empty.
+        if past_key_values is not None and len(past_key_values) > 0:
+            input_ids = input_ids[:, -1:]
+        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
+        if inputs_embeds is not None and len(past_key_values) == 0:
+            model_inputs = {'inputs_embeds': inputs_embeds}
+        else:
+            # The `contiguous()` here is necessary to have a static stride during decoding. torchdynamo otherwise
+            # recompiles graphs as the stride of the inputs is a guard.
+            # Ref: https://github.com/huggingface/transformers/pull/29114
+            # TODO: use `next_tokens` directly instead.
+            model_inputs = {'input_ids': input_ids.contiguous()}
+
+        if logits_to_keep is not None:
+            model_inputs['logits_to_keep'] = logits_to_keep
+
+        model_inputs.update({
+            'past_key_values': past_key_values,
+            'use_cache': use_cache,
+            'attention_mask': attention_mask,
+        })
+        return model_inputs
 
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def forward(
@@ -307,14 +356,14 @@ class MonoTransformerForCausalLM(MonoTransformerPreTrainedModel, FLAGenerationMi
         )
 
         hidden_states = outputs[0]
-
-        logits = None if self.config.fuse_linear_cross_entropy else self.lm_head(hidden_states[:, -logits_to_keep:])
+        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
+        logits = None if fuse_linear_and_cross_entropy else self.lm_head(hidden_states[:, -logits_to_keep:])
 
         loss = None
         if labels is not None:
             if getattr(self, 'criterion', None) is None:
-                if self.config.fuse_linear_cross_entropy:
-                    criterion = FusedLinearCrossEntropyLoss(use_l2warp=self.config.use_l2warp)
+                if fuse_linear_and_cross_entropy:
+                    criterion = FusedLinearCrossEntropyLoss()
                 elif self.config.fuse_cross_entropy:
                     criterion = FusedCrossEntropyLoss(inplace_backward=True)
                 else:
@@ -324,11 +373,10 @@ class MonoTransformerForCausalLM(MonoTransformerPreTrainedModel, FLAGenerationMi
             # Enable model parallelism
             labels = labels.to(hidden_states.device)
             labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-            if self.config.fuse_linear_cross_entropy:
+            if fuse_linear_and_cross_entropy:
                 loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
             else:
                 loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))
-                loss = l2_warp(loss, logits) if self.config.use_l2warp else loss
 
         if not return_dict:
             output = (logits,) + outputs[1:]
