@@ -199,6 +199,7 @@ class DSMTPTransformerModel(DSMTPTransformerPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        return_all_heads: bool = False,
         **kwargs: Unpack[Any]
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         if output_attentions:
@@ -270,13 +271,38 @@ class DSMTPTransformerModel(DSMTPTransformerPreTrainedModel):
             if output_attentions:
                 all_attns += (layer_outputs[1],)
 
-        
+        n_heads_to_use = self.config.n_future_tokens if return_all_heads or self.training else 1
+        prediction_heads_to_use = self.extra_heads[:n_heads_to_use]
         latents = []
-        for i, block in enumerate(self.extra_heads):
+        for i, block in enumerate(prediction_heads_to_use):
             if i < input_ids.shape[1]:
                 if i > 0:
                     hidden_states = self.norms_1[i](hidden_states)
                     new_input = self.norms_2[i](inputs_embeds[:, i, :, :])
+                    hidden_states = torch.cat((hidden_states, new_input), dim=-1)
+                    hidden_states = self.projection_head[i](hidden_states)
+                
+                layer_outputs = block(
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    past_key_values=None, # No cache for extra heads
+                    output_attentions=output_attentions,
+                    use_cache=False,
+                    **kwargs
+                )
+                hidden_states = layer_outputs[0]
+                latents.append(hidden_states)
+            elif return_all_heads and 'lm_head' in kwargs:
+                # at inference time, the golden future tokens don't exist
+                # so we need to sample on the fly
+                lm_head = kwargs['lm_head']
+                if i > 0:
+                    new_inputs = lm_head(self.norm(hidden_states[:, -1:, :]))
+                    sampled_tokens = torch.argmax(new_inputs, dim=-1)
+                    sampled_embeds = self.embeddings(sampled_tokens)
+                    inputs_embeds = torch.cat((inputs_embeds, sampled_embeds.unsqueeze(1)), dim=-2)
+                    hidden_states = self.norms_1[i](hidden_states)
+                    new_input = self.norms_2[i](inputs_embeds[:, 0, -hidden_states.shape[1]:, :])
                     hidden_states = torch.cat((hidden_states, new_input), dim=-1)
                     hidden_states = self.projection_head[i](hidden_states)
                 
@@ -392,12 +418,13 @@ class DSMTPTransformerForCausalLM(DSMTPTransformerPreTrainedModel, GenerationMix
         logits_to_keep: Optional[int] = 0,
         **kwargs: Unpack[Any]
     ) -> Union[Tuple, CausalLMOutputWithPast]:
-        input_ids, all_labels = seq_to_dsmtp(input_ids, labels, n_future_tokens=self.config.n_future_tokens if labels is not None else 1, model_seq_len=input_ids.shape[1])
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_all_heads = self.training or ('output_dsmtp_logits' in kwargs and kwargs['output_dsmtp_logits'])
+        input_ids, all_labels = seq_to_dsmtp(input_ids, labels, n_future_tokens=self.config.n_future_tokens if labels is not None or return_all_heads else 1, model_seq_len=input_ids.shape[1])
 
         outputs = self.model(
             input_ids=input_ids,
@@ -408,6 +435,8 @@ class DSMTPTransformerForCausalLM(DSMTPTransformerPreTrainedModel, GenerationMix
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            return_all_heads=return_all_heads,
+            lm_head=self.lm_head if return_all_heads and labels is None else None,
             **kwargs
         )
 

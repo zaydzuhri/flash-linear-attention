@@ -530,6 +530,7 @@ class MTPTransformerForCausalLM(MTPTransformerPreTrainedModel, GenerationMixin):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         return_all_heads = self.training or ('output_mtp_logits' in kwargs and kwargs['output_mtp_logits'])
+        
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
