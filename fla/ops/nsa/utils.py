@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, <CENSORED>, <CENSORED>
 
 # Implements argsort based on bitonic sort.
 # [What is bitonic sort?](https://en.wikipedia.org/wiki/Bitonic_sorter)

@@ -245,12 +245,12 @@ Simply run it by:
 $ python -m benchmarks.benchmark_generation \
   --path 'fla-hub/gla-1.3B-100B' \
   --repetition_penalty 2. \
-  --prompt="Hello everyone, I'm Songlin Yang"
+  --prompt="Hello everyone, I'm <CENSORED>"
 
 Prompt:
-Hello everyone, I'm Songlin Yang
+Hello everyone, I'm <CENSORED>
 Generated:
-Hello everyone, I'm Songlin Yang.
+Hello everyone, I'm <CENSORED>.
 I am a 20 year old girl from China who is currently studying in the United States of America for my Master degree and also working as an English teacher at school here on campus since last summer (1st semester). My main goal to be able do well with this course so that we can have
 
 Prompt length: 10, generation length: 64
@@ -465,7 +465,7 @@ If you find this repository helpful, please cite our work:
 
 @inproceedings{yang2024gdn,
   title     = {Gated Delta Networks: Improving Mamba2 with Delta Rule},
-  author    = {Songlin Yang and Jan Kautz and Ali Hatamizadeh},
+  author    = {<CENSORED> and Jan Kautz and Ali Hatamizadeh},
   booktitle = {Proceedings of ICLR},
   year      = {2025}
 }

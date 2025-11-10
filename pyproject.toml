@@ -4,8 +4,8 @@ dynamic = ["version"]
 description = "Fast Triton-based implementations of causal linear attention"
 readme = "README.md"
 authors = [
-    { name = "Songlin Yang", email = "yangsl66@mit.edu" },
-    { name = "Yu Zhang", email = "yzhang.cs@outlook.com" },
+    { name = "<CENSORED>", email = "yangsl66@mit.edu" },
+    { name = "<CENSORED>", email = "yzhang.cs@outlook.com" },
 ]
 license = { file = "LICENSE" }
 classifiers = [

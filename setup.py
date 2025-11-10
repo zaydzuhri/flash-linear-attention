@@ -23,7 +23,7 @@ setup(
     description='Fast Triton-based implementations of causal linear attention',
     long_description=long_description,
     long_description_content_type='text/markdown',
-    author='Songlin Yang, Yu Zhang',
+    author='<CENSORED>, <CENSORED>',
     author_email='yangsl66@mit.edu, yzhang.cs@outlook.com',
     url='https://github.com/fla-org/flash-linear-attention',
     packages=find_packages(),

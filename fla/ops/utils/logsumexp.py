@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2023-2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2024, <CENSORED>, <CENSORED>
 
 from typing import Optional
 

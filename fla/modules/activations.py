@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Tri Dao, Yu Zhang, Songlin Yang.
+# Copyright (c) 2023-2025, Tri Dao, <CENSORED>, <CENSORED>.
 
 import torch
 import torch.nn.functional as F

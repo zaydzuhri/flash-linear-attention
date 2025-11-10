@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, <CENSORED>, <CENSORED>
 
 # this function implements the chunkwise form of HGRN, inspired by
 # [Volodymyr Kyrylov in his blog post](https://proger.github.io/posts/scan/chunk.html)
