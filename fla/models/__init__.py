@@ -25,6 +25,7 @@ from fla.models.rwkv7 import RWKV7Config, RWKV7ForCausalLM, RWKV7Model
 from fla.models.samba import SambaConfig, SambaForCausalLM, SambaModel
 from fla.models.transformer import TransformerConfig, TransformerForCausalLM, TransformerModel
 from fla.models.transformer_with_pruning import TransformerWithPruningConfig, TransformerWithPruningForCausalLM, TransformerWithPruningModel
+from fla.models.stochastic_softpick_transformer import StochasticSoftpickTransformerConfig, StochasticSoftpickTransformerForCausalLM, StochasticSoftpickTransformerModel
 
 __all__ = [
     'ABCConfig', 'ABCForCausalLM', 'ABCModel',
@@ -48,4 +49,5 @@ __all__ = [
     'TransformerConfig', 'TransformerForCausalLM', 'TransformerModel',
     'TransformerWithPruningConfig', 'TransformerWithPruningForCausalLM', 'TransformerWithPruningModel',
     'GatedDeltaProductConfig', 'GatedDeltaProductForCausalLM', 'GatedDeltaProductModel',
+    'StochasticSoftpickTransformerConfig', 'StochasticSoftpickTransformerForCausalLM', 'StochasticSoftpickTransformerModel'
 ]
