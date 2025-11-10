@@ -367,7 +367,7 @@ class StochasticSoftpickAttention(nn.Module):
 
         p = torch.rand(1, device=q.device)
         stochastic_p = torch.tensor(self.stochastic_value, dtype=torch.float32, device=q.device)
-        cond = torch.where(p > stochastic_p, torch.tensor(1, dtype=torch.bool, device=q.device), torch.tensor(0, dtype=torch.bool, device=q.device))
+        cond = torch.where(p < stochastic_p, torch.tensor(1, dtype=torch.bool, device=q.device), torch.tensor(0, dtype=torch.bool, device=q.device))
         if self.attn_impl == "flash_attn":
             if attention_mask is not None:
                 q, k, v, indices_q, cu_seq_lens, max_seq_lens = self._upad_input(q, k, v, attention_mask, q_len)
