@@ -411,7 +411,7 @@ class TOPTransformerForCausalLM(TOPTransformerPreTrainedModel, GenerationMixin):
                 ntp_loss = criterion(logits.view(ntp_labels.numel(), -1), ntp_labels.reshape(-1))
 
             if self.config.use_top_loss:
-                top_labels = seq_to_top(labels, vocab_size=self.vocab_size, window_size=self.top_window_size, pad_token_id=self.pad_token_id).contiguous()
+                top_labels = seq_to_top(labels, ctx_len=input_ids.shape[1], vocab_size=self.vocab_size, window_size=self.top_window_size, pad_token_id=self.pad_token_id).contiguous()
                 top_loss = self.top_criterion(hidden_states, top_labels, self.top_head.weight, self.top_head.bias)
                 loss = ntp_loss + top_loss
             else:

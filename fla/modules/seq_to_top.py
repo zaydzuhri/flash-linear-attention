@@ -66,6 +66,7 @@ def _seq_to_top_kernel(
 
 def seq_to_top(
     seq: torch.Tensor, 
+    ctx_len: int,
     vocab_size: int, 
     window_size: int,
     pad_token_id: int
@@ -79,13 +80,13 @@ def seq_to_top(
     :param pad_token_id: Padding token ID
     :return: Tensor of shape (B, T, V) with window_size - distance for tokens in window, else -inf
     """
-    if pad_token_id is None:
+    if pad_token_id is None:    
         pad_token_id = -100
-        
+
     B, T_total = seq.shape
-    T = T_total - window_size
+    T = ctx_len
     
-    assert T > 0, "T_total must be greater than window_size to produce valid output."
+    assert T_total > window_size, "T_total must be greater than window_size to produce valid output."
     
     output = torch.empty((B, T, vocab_size), device=seq.device, dtype=torch.float16)
     if not output.is_contiguous():
