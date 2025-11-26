@@ -278,8 +278,9 @@ class StochasticSoftpickAttention(nn.Module):
         self.max_position_embeddings = max_position_embeddings
         self.layer_idx = layer_idx
         self._softpick_manual = softpick_impl is not None
-        self._softpick_attn_impl = softpick_impl or self._infer_softpick_attn_impl(attn_impl)
-        self._attn_impl = attn_impl
+        inferred_softpick = self._infer_softpick_attn_impl(attn_impl) if softpick_impl is None else softpick_impl
+        self._softpick_attn_impl = inferred_softpick
+        self._attn_impl = self._infer_softmax_from_softpick(attn_impl) if softpick_impl is None else attn_impl
         self.stochastic_value = 0.0
         self.set_stochastic_value(stochastic_p)
         self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=self.qkv_bias)
@@ -303,9 +304,11 @@ class StochasticSoftpickAttention(nn.Module):
 
     @attn_impl.setter
     def attn_impl(self, value: str) -> None:
-        self._attn_impl = value
         if not self._softpick_manual:
             self._softpick_attn_impl = self._infer_softpick_attn_impl(value)
+            self._attn_impl = self._infer_softmax_from_softpick(value)
+        else:
+            self._attn_impl = value
 
     @property
     def softpick_attn_impl(self) -> str:
@@ -338,6 +341,19 @@ class StochasticSoftpickAttention(nn.Module):
             return attn_impl
         if attn_impl.endswith("_attn"):
             return attn_impl.replace("_attn", "_softpick_attn")
+        return attn_impl
+
+    def _infer_softmax_from_softpick(self, attn_impl: str) -> str:
+        inverse_mapping = {
+            "parallel_softpick_attn": "parallel_attn",
+            "parallel_scaled_softpick_attn": "parallel_scaled_attn",
+            "naive_softpick_attn": "naive_attn",
+            "naive_scaled_softpick_attn": "naive_scaled_attn",
+        }
+        if attn_impl in inverse_mapping:
+            return inverse_mapping[attn_impl]
+        if "softpick" in attn_impl and attn_impl.endswith("_attn"):
+            return attn_impl.replace("_softpick", "")
         return attn_impl
 
     def _sample_use_softpick(self, device: torch.device) -> bool:
