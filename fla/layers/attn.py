@@ -257,6 +257,7 @@ class StochasticSoftpickAttention(nn.Module):
         layer_idx: int = None,
         attn_impl: str = "flash_attn",
         stochastic_p: float = 0.5,
+        softpick_impl: Optional[str] = None,
     ):
         super().__init__()
 
@@ -276,14 +277,17 @@ class StochasticSoftpickAttention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
         self.layer_idx = layer_idx
-        self.attn_impl = attn_impl
-        self.stochastic_value = stochastic_p
+        self._softpick_manual = softpick_impl is not None
+        self._softpick_attn_impl = softpick_impl or self._infer_softpick_attn_impl(attn_impl)
+        self._attn_impl = attn_impl
+        self.stochastic_value = 0.0
+        self.set_stochastic_value(stochastic_p)
         self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=self.qkv_bias)
         self.k_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
         self.v_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
 
-        if "scaled" in self.attn_impl:
+        if self._uses_scaled_attention:
             self.s = nn.Parameter(torch.empty(self.num_heads, 1))
             self.register_buffer("logn", torch.log(torch.arange(2, self.max_position_embeddings*4+2, dtype=self.s.dtype)[:, None, None]))
 
@@ -293,8 +297,58 @@ class StochasticSoftpickAttention(nn.Module):
 
         self.rotary = RotaryEmbedding(dim=self.head_dim, base=self.rope_theta)
 
+    @property
+    def attn_impl(self) -> str:
+        return self._attn_impl
+
+    @attn_impl.setter
+    def attn_impl(self, value: str) -> None:
+        self._attn_impl = value
+        if not self._softpick_manual:
+            self._softpick_attn_impl = self._infer_softpick_attn_impl(value)
+
+    @property
+    def softpick_attn_impl(self) -> str:
+        return self._softpick_attn_impl
+
+    @softpick_attn_impl.setter
+    def softpick_attn_impl(self, value: str) -> None:
+        self._softpick_attn_impl = value
+        self._softpick_manual = True
+
+    @property
+    def _uses_scaled_attention(self) -> bool:
+        return any(
+            "scaled" in impl for impl in (self.attn_impl, self.softpick_attn_impl) if impl is not None
+        )
+
+    def set_stochastic_value(self, value: float) -> None:
+        self.stochastic_value = float(min(1.0, max(0.0, value)))
+
+    def _infer_softpick_attn_impl(self, attn_impl: str) -> str:
+        mapping = {
+            "parallel_attn": "parallel_softpick_attn",
+            "parallel_scaled_attn": "parallel_scaled_softpick_attn",
+            "naive_attn": "naive_softpick_attn",
+            "naive_scaled_attn": "naive_scaled_softpick_attn",
+        }
+        if attn_impl in mapping:
+            return mapping[attn_impl]
+        if "softpick" in attn_impl:
+            return attn_impl
+        if attn_impl.endswith("_attn"):
+            return attn_impl.replace("_attn", "_softpick_attn")
+        return attn_impl
+
+    def _sample_use_softpick(self, device: torch.device) -> bool:
+        if self.stochastic_value <= 0:
+            return False
+        if self.stochastic_value >= 1:
+            return True
+        return bool(torch.rand((), device=device) < self.stochastic_value)
+
     def reset_parameters(self):
-        if "scaled" in self.attn_impl:
+        if self._uses_scaled_attention:
             nn.init.constant_(self.s, 0.3)
             self.logn.copy_(torch.log(torch.arange(2, self.max_position_embeddings*4+2, dtype=self.s.dtype)[:, None, None]))
 
@@ -359,16 +413,46 @@ class StochasticSoftpickAttention(nn.Module):
         # if flash_attn_func is None:
         #     raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")
 
-        if "scaled" in self.attn_impl:
+        attn_impl_to_use = self.softpick_attn_impl if self._sample_use_softpick(q.device) else self.attn_impl
+
+        if "scaled" in attn_impl_to_use:
             k_len = k.shape[1]
             q = q * self.s.to(q.dtype) * self.logn[k_len-q_len:k_len].to(q.dtype)
 
-        # Contains at least one padding token in the sequence
+        o, attentions = self._apply_attention(
+            attn_impl_to_use,
+            q,
+            k,
+            v,
+            attention_mask,
+            cu_seqlens,
+            batch_size,
+            q_len,
+            max_seqlen,
+        )
 
-        p = torch.rand(1, device=q.device)
-        stochastic_p = torch.tensor(self.stochastic_value, dtype=torch.float32, device=q.device)
-        cond = torch.where(p < stochastic_p, torch.tensor(1, dtype=torch.bool, device=q.device), torch.tensor(0, dtype=torch.bool, device=q.device))
-        if self.attn_impl == "flash_attn":
+        o = o.reshape(batch_size, q_len, -1)
+        o = self.o_proj(o)
+
+        if not output_attentions or "parallel" in attn_impl_to_use or "flash" in attn_impl_to_use:
+            attentions = None
+
+        return o, attentions, past_key_values
+
+    def _apply_attention(
+        self,
+        attn_impl: str,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        cu_seqlens: Optional[torch.Tensor],
+        batch_size: int,
+        q_len: int,
+        max_seqlen: int,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        attentions = None
+        if attn_impl == "flash_attn":
             if attention_mask is not None:
                 q, k, v, indices_q, cu_seq_lens, max_seq_lens = self._upad_input(q, k, v, attention_mask, q_len)
                 cu_seqlens_q, cu_seqlens_k = cu_seq_lens
@@ -399,67 +483,29 @@ class StochasticSoftpickAttention(nn.Module):
                     causal=True,
                     window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
                 )
-        
-        elif self.attn_impl == "parallel_attn":
-            if cond:
-                o = parallel_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
-            else:
-                o = parallel_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
-        elif self.attn_impl == "parallel_scaled_attn":
-            if cond:
-                o = parallel_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
-            else:
-                o = parallel_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
-        elif self.attn_impl == "parallel_rectified_attn":
-            if cond:
-                o = parallel_rectified_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
-            else:
-                o = parallel_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
-        elif self.attn_impl == "parallel_softpick_attn":
-            if cond:
-                o = parallel_softpick_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
-            else:
-                o = parallel_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
-        elif self.attn_impl == "parallel_scaled_softpick_attn":
-            if cond:
-                o = parallel_softpick_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
-            else:
-                o = parallel_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
-        elif self.attn_impl == "naive_attn":
-            if cond:
-                o, attentions = naive_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
-            else:
-                o = parallel_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
-        elif self.attn_impl == "naive_scaled_attn":
-            if cond:
-                o, attentions = naive_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
-            else:
-                o = parallel_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
-        elif self.attn_impl == "naive_rectified_attn":
-            if cond:
-                o, attentions = naive_rectified_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
-            else:
-                o = parallel_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
-        elif self.attn_impl == "naive_softpick_attn":
-            if cond:
-                o, attentions = naive_softpick_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
-            else:
-                o = parallel_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
-        elif self.attn_impl == "naive_scaled_softpick_attn":
-            if cond:
-                o, attentions = naive_softpick_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
-            else:
-                o = parallel_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "parallel_attn":
+            o = parallel_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "parallel_scaled_attn":
+            o = parallel_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "parallel_rectified_attn":
+            o = parallel_rectified_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "parallel_softpick_attn":
+            o = parallel_softpick_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "parallel_scaled_softpick_attn":
+            o = parallel_softpick_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "naive_attn":
+            o, attentions = naive_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "naive_scaled_attn":
+            o, attentions = naive_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "naive_rectified_attn":
+            o, attentions = naive_rectified_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "naive_softpick_attn":
+            o, attentions = naive_softpick_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "naive_scaled_softpick_attn":
+            o, attentions = naive_softpick_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
         else:
-            raise ValueError(f"Unknown attention implementation: {self.attn_impl}")
-
-        o = o.reshape(batch_size, q_len, -1)
-        o = self.o_proj(o)
-
-        if not output_attentions or "parallel" in self.attn_impl or "flash" in self.attn_impl:
-            attentions = None
-
-        return o, attentions, past_key_values
+            raise ValueError(f"Unknown attention implementation: {attn_impl}")
+        return o, attentions
 
     def _upad_input(self, q, k, v, attention_mask, q_len):
         batch_size, seq_len, num_key_value_heads, head_dim = k.shape

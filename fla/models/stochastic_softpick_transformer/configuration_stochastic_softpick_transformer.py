@@ -37,6 +37,7 @@ class StochasticSoftpickTransformerConfig(PretrainedConfig):
         fuse_cross_entropy: bool = True,
         vocab_size: int = 32000,
         attn_impl: str = "flash_attn", # {flash_attn, parallel_attn, parallel_rectified_attn}, parallel_attn and parallel_rectified_attn are the fla.ops implementations which don't support inference
+        stochastic_p: float = 0.5,
         **kwargs,
     ):
         self.hidden_size = hidden_size
@@ -64,6 +65,7 @@ class StochasticSoftpickTransformerConfig(PretrainedConfig):
         self.vocab_size = vocab_size
 
         self.attn_impl = attn_impl
+        self.stochastic_p = stochastic_p
 
         super().__init__(
             pad_token_id=pad_token_id,
