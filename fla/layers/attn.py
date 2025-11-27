@@ -6,6 +6,7 @@ from __future__ import annotations
 import warnings
 from typing import TYPE_CHECKING, Optional, Tuple
 
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -29,7 +30,10 @@ except ImportError:
     )
     flash_attn_func = None
 
+log_level = os.getenv("LOGLEVEL", "WARNING").upper()
+logging.logging.basicConfig(level=log_level)
 logger = logging.get_logger(__name__)
+
 
 
 class Attention(nn.Module):
@@ -358,10 +362,18 @@ class StochasticSoftpickAttention(nn.Module):
 
     def _sample_use_softpick(self, device: torch.device) -> bool:
         if self.stochastic_value <= 0:
+            logger.debug("USE SOFTMAX")
             return False
         if self.stochastic_value >= 1:
+            logger.debug("USE SOFTPICK")
             return True
-        return bool(torch.rand((), device=device) < self.stochastic_value)
+        p = torch.rand((), device=device)
+        use_softpick = bool(p < self.stochastic_value)
+        if use_softpick:
+            logger.debug(f"USE SOFTPICK with {p = }")
+        else:
+            logger.debug(f"USE SOFTMAX with {p = }")
+        return use_softpick
 
     def reset_parameters(self):
         if self._uses_scaled_attention:
@@ -430,6 +442,12 @@ class StochasticSoftpickAttention(nn.Module):
         #     raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")
 
         attn_impl_to_use = self.softpick_attn_impl if self._sample_use_softpick(q.device) else self.attn_impl
+        if os.getenv("LOG_ATTENTION_MODE") == "1":
+            logger.info(
+                f"[StochasticSoftpickAttention] layer={self.layer_idx} "
+                f"mode={'softpick' if 'softpick' in attn_impl_to_use else 'softmax'} "
+                f"impl={attn_impl_to_use} p={self.stochastic_value:.3f}"
+            )
 
         if "scaled" in attn_impl_to_use:
             k_len = k.shape[1]
