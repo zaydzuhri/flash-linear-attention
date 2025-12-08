@@ -37,6 +37,7 @@ class TOPTransformerConfig(PretrainedConfig):
         fuse_cross_entropy: bool = True,
         vocab_size: int = 32000,
         use_top_loss: bool = False,
+        top_loss_ratio: float = 0.5,
         top_window_size: Optional[int] = None,
         **kwargs,
     ):
@@ -65,6 +66,7 @@ class TOPTransformerConfig(PretrainedConfig):
         self.vocab_size = vocab_size
 
         self.use_top_loss = use_top_loss
+        self.top_loss_ratio = top_loss_ratio
         self.top_window_size = top_window_size if top_window_size is not None else max_position_embeddings
 
         super().__init__(

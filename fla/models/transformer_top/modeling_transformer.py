@@ -413,7 +413,11 @@ class TOPTransformerForCausalLM(TOPTransformerPreTrainedModel, GenerationMixin):
             if self.config.use_top_loss:
                 top_labels = seq_to_top(labels, ctx_len=input_ids.shape[1], vocab_size=self.vocab_size, window_size=self.top_window_size, pad_token_id=self.pad_token_id).contiguous()
                 top_loss = self.top_criterion(hidden_states, top_labels, self.top_head.weight, self.top_head.bias)
-                loss = ntp_loss + top_loss
+                if self.config.top_loss_ratio == 0.5:
+                    loss = ntp_loss + top_loss
+                else:
+                    ratio = 2 * self.config.top_loss_ratio
+                    loss = (2 - ratio) * ntp_loss + ratio * top_loss
             else:
                 loss = ntp_loss
 
