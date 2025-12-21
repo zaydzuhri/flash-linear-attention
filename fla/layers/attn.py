@@ -15,7 +15,22 @@ from einops import rearrange
 from transformers.utils import logging
 
 from fla.modules import RMSNorm, RotaryEmbedding
-from fla.ops import parallel_attn, parallel_rectified_attn, parallel_softpick_attn, naive_attn, naive_rectified_attn, naive_softpick_attn
+from fla.ops import (
+    parallel_attn,
+    parallel_rectified_attn,
+    parallel_softpick_attn,
+    parallel_relu_softpick_1_attn,
+    parallel_relu_softpick_2_attn,
+    parallel_abs_softmax_1_attn,
+    parallel_abs_softmax_2_attn,
+    naive_attn,
+    naive_rectified_attn,
+    naive_softpick_attn,
+    naive_relu_softpick_1_attn,
+    naive_relu_softpick_2_attn,
+    naive_abs_softmax_1_attn,
+    naive_abs_softmax_2_attn,
+)
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
@@ -197,6 +212,14 @@ class Attention(nn.Module):
             o = parallel_softpick_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
         elif self.attn_impl == "parallel_scaled_softpick_attn":
             o = parallel_softpick_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "parallel_relu_softpick_1_attn":
+            o = parallel_relu_softpick_1_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "parallel_relu_softpick_2_attn":
+            o = parallel_relu_softpick_2_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "parallel_abs_softmax_1_attn":
+            o = parallel_abs_softmax_1_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "parallel_abs_softmax_2_attn":
+            o = parallel_abs_softmax_2_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
         elif self.attn_impl == "naive_attn":
             o, attentions = naive_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
         elif self.attn_impl == "naive_scaled_attn":
@@ -207,6 +230,14 @@ class Attention(nn.Module):
             o, attentions = naive_softpick_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
         elif self.attn_impl == "naive_scaled_softpick_attn":
             o, attentions = naive_softpick_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "naive_relu_softpick_1_attn":
+            o, attentions = naive_relu_softpick_1_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "naive_relu_softpick_2_attn":
+            o, attentions = naive_relu_softpick_2_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "naive_abs_softmax_1_attn":
+            o, attentions = naive_abs_softmax_1_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "naive_abs_softmax_2_attn":
+            o, attentions = naive_abs_softmax_2_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
         else:
             raise ValueError(f"Unknown attention implementation: {self.attn_impl}")
 
@@ -351,8 +382,16 @@ class StochasticSoftpickAttention(nn.Module):
         inverse_mapping = {
             "parallel_softpick_attn": "parallel_attn",
             "parallel_scaled_softpick_attn": "parallel_scaled_attn",
+            "parallel_relu_softpick_1_attn": "parallel_attn",
+            "parallel_relu_softpick_2_attn": "parallel_attn",
+            "parallel_abs_softmax_1_attn": "parallel_attn",
+            "parallel_abs_softmax_2_attn": "parallel_attn",
             "naive_softpick_attn": "naive_attn",
             "naive_scaled_softpick_attn": "naive_scaled_attn",
+            "naive_relu_softpick_1_attn": "naive_attn",
+            "naive_relu_softpick_2_attn": "naive_attn",
+            "naive_abs_softmax_1_attn": "naive_attn",
+            "naive_abs_softmax_2_attn": "naive_attn",
         }
         if attn_impl in inverse_mapping:
             return inverse_mapping[attn_impl]
@@ -527,6 +566,14 @@ class StochasticSoftpickAttention(nn.Module):
             o = parallel_softpick_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
         elif attn_impl == "parallel_scaled_softpick_attn":
             o = parallel_softpick_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "parallel_relu_softpick_1_attn":
+            o = parallel_relu_softpick_1_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "parallel_relu_softpick_2_attn":
+            o = parallel_relu_softpick_2_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "parallel_abs_softmax_1_attn":
+            o = parallel_abs_softmax_1_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "parallel_abs_softmax_2_attn":
+            o = parallel_abs_softmax_2_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
         elif attn_impl == "naive_attn":
             o, attentions = naive_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
         elif attn_impl == "naive_scaled_attn":
@@ -537,6 +584,14 @@ class StochasticSoftpickAttention(nn.Module):
             o, attentions = naive_softpick_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
         elif attn_impl == "naive_scaled_softpick_attn":
             o, attentions = naive_softpick_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "naive_relu_softpick_1_attn":
+            o, attentions = naive_relu_softpick_1_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "naive_relu_softpick_2_attn":
+            o, attentions = naive_relu_softpick_2_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "naive_abs_softmax_1_attn":
+            o, attentions = naive_abs_softmax_1_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "naive_abs_softmax_2_attn":
+            o, attentions = naive_abs_softmax_2_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
         else:
             raise ValueError(f"Unknown attention implementation: {attn_impl}")
         return o, attentions
