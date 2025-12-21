@@ -3,8 +3,8 @@
 import torch
 import triton
 
-from fla.ops.attn import parallel_relu_softpick_1_attn
-from fla.ops.attn.naive_relusoftpick import reference_naive_relu_softpick_1_attn
+from fla.ops.attn import parallel_abs_softmax_2_attn
+from fla.ops.attn.naive_abs_softmax import reference_naive_abs_softmax_2_attn
 
 
 @triton.testing.perf_report(
@@ -31,7 +31,7 @@ from fla.ops.attn.naive_relusoftpick import reference_naive_relu_softpick_1_attn
             ("red", "dotted"),
         ],
         ylabel="Execution Time (ms)",
-        plot_name="relu_softpick_1_performance",
+        plot_name="abs_softmax_2_performance",
         args={},
     )
 )
@@ -50,22 +50,22 @@ def benchmark(T, provider):
     quantiles = [0.5, 0.2, 0.8]
     if provider == "triton_fwd":
         return triton.testing.do_bench(
-            lambda: parallel_relu_softpick_1_attn(q, k, v, head_first=False),
+            lambda: parallel_abs_softmax_2_attn(q, k, v, head_first=False),
             quantiles=quantiles,
         )
     if provider == "ref_fwd":
         return triton.testing.do_bench(
-            lambda: reference_naive_relu_softpick_1_attn(q, k, v, head_first=False)[0],
+            lambda: reference_naive_abs_softmax_2_attn(q, k, v, head_first=False)[0],
             quantiles=quantiles,
         )
     if provider == "triton_fwdbwd":
         return triton.testing.do_bench(
-            lambda: parallel_relu_softpick_1_attn(q, k, v, head_first=False).backward(do),
+            lambda: parallel_abs_softmax_2_attn(q, k, v, head_first=False).backward(do),
             quantiles=quantiles,
         )
     if provider == "ref_fwdbwd":
         return triton.testing.do_bench(
-            lambda: reference_naive_relu_softpick_1_attn(q, k, v, head_first=False)[0].backward(do),
+            lambda: reference_naive_abs_softmax_2_attn(q, k, v, head_first=False)[0].backward(do),
             quantiles=quantiles,
         )
     raise ValueError(f"Unknown provider {provider}")
@@ -97,10 +97,10 @@ def print_memory_table():
             val /= 1024
 
     providers = [
-        ("triton_fwd", lambda q, k, v, do: parallel_relu_softpick_1_attn(q, k, v, head_first=False)),
-        ("ref_fwd", lambda q, k, v, do: reference_naive_relu_softpick_1_attn(q, k, v, head_first=False)[0]),
-        ("triton_fwdbwd", lambda q, k, v, do: parallel_relu_softpick_1_attn(q, k, v, head_first=False).backward(do)),
-        ("ref_fwdbwd", lambda q, k, v, do: reference_naive_relu_softpick_1_attn(q, k, v, head_first=False)[0].backward(do)),
+        ("triton_fwd", lambda q, k, v, do: parallel_abs_softmax_2_attn(q, k, v, head_first=False)),
+        ("ref_fwd", lambda q, k, v, do: reference_naive_abs_softmax_2_attn(q, k, v, head_first=False)[0]),
+        ("triton_fwdbwd", lambda q, k, v, do: parallel_abs_softmax_2_attn(q, k, v, head_first=False).backward(do)),
+        ("ref_fwdbwd", lambda q, k, v, do: reference_naive_abs_softmax_2_attn(q, k, v, head_first=False)[0].backward(do)),
     ]
     x_vals = [64] + [128 * 2 ** i for i in range(0, 6)]
     dtype = torch.bfloat16
