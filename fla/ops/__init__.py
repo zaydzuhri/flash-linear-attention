@@ -16,6 +16,7 @@ from .attn import (
     naive_relu_softpick_2_attn,
     naive_abs_softmax_1_attn,
     naive_abs_softmax_2_attn,
+    naive_gated_attn,
 )
 from .based import fused_chunk_based, parallel_based
 from .delta_rule import chunk_delta_rule, fused_chunk_delta_rule, fused_recurrent_delta_rule
@@ -46,6 +47,7 @@ __all__ = [
     'naive_attn', 'naive_rectified_attn', 'naive_softpick_attn',
     'naive_relu_softpick_1_attn', 'naive_relu_softpick_2_attn',
     'naive_abs_softmax_1_attn', 'naive_abs_softmax_2_attn',
+    'naive_gated_attn',
     'fused_chunk_based', 'parallel_based',
     'chunk_delta_rule', 'fused_chunk_delta_rule', 'fused_recurrent_delta_rule',
     'parallel_forgetting_attn',

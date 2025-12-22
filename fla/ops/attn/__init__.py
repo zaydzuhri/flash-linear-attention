@@ -11,6 +11,7 @@ from .naive_rectified import naive_rectified_attn
 from .naive_softpick import naive_softpick_attn
 from .naive_relusoftpick import naive_relu_softpick_1_attn, naive_relu_softpick_2_attn
 from .naive_abs_softmax import naive_abs_softmax_1_attn, naive_abs_softmax_2_attn
+from .naive_gated import naive_gated_attn
 
 __all__ = [
     'parallel_attn',
@@ -27,4 +28,5 @@ __all__ = [
     'naive_relu_softpick_2_attn',
     'naive_abs_softmax_1_attn',
     'naive_abs_softmax_2_attn',
+    'naive_gated_attn',
 ]

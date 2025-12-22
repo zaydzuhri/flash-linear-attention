@@ -16,6 +16,7 @@ from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.attn import Attention
+from fla.layers.gated_attn import GatedAttention
 from fla.models.transformer.configuration_transformer import TransformerConfig
 from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
@@ -38,18 +39,34 @@ class TransformerBlock(nn.Module):
         self.layer_idx = layer_idx
 
         self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
-        self.attn = Attention(
-            hidden_size=config.hidden_size,
-            num_heads=config.num_heads,
-            num_kv_heads=config.num_kv_heads,
-            qkv_bias=config.qkv_bias,
-            qk_norm=config.qk_norm,
-            window_size=config.window_size,
-            rope_theta=config.rope_theta,
-            max_position_embeddings=config.max_position_embeddings,
-            layer_idx=layer_idx,
-            attn_impl=config.attn_impl
-        )
+
+        # Use GatedAttention when elementwise_gate is enabled, otherwise use standard Attention
+        if config.elementwise_gate:
+            self.attn = GatedAttention(
+                hidden_size=config.hidden_size,
+                num_heads=config.num_heads,
+                num_kv_heads=config.num_kv_heads,
+                qkv_bias=config.qkv_bias,
+                qk_norm=config.qk_norm,
+                window_size=config.window_size,
+                rope_theta=config.rope_theta,
+                max_position_embeddings=config.max_position_embeddings,
+                layer_idx=layer_idx,
+                attn_impl=config.attn_impl,
+            )
+        else:
+            self.attn = Attention(
+                hidden_size=config.hidden_size,
+                num_heads=config.num_heads,
+                num_kv_heads=config.num_kv_heads,
+                qkv_bias=config.qkv_bias,
+                qk_norm=config.qk_norm,
+                window_size=config.window_size,
+                rope_theta=config.rope_theta,
+                max_position_embeddings=config.max_position_embeddings,
+                layer_idx=layer_idx,
+                attn_impl=config.attn_impl,
+            )
 
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
         self.mlp = TransformerMLP(
