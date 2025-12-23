@@ -20,6 +20,11 @@ from fla.models.forgetting_transformer import (
 )
 from fla.models.gated_deltanet import GatedDeltaNetConfig, GatedDeltaNetForCausalLM, GatedDeltaNetModel
 from fla.models.gated_deltaproduct import GatedDeltaProductConfig, GatedDeltaProductForCausalLM, GatedDeltaProductModel
+from fla.models.gated_attention_transformer import (
+    GatedAttentionTransformerConfig,
+    GatedAttentionTransformerForCausalLM,
+    GatedAttentionTransformerModel,
+)
 from fla.models.gla import GLAConfig, GLAForCausalLM, GLAModel
 from fla.models.gsa import GSAConfig, GSAForCausalLM, GSAModel
 from fla.models.hgrn import HGRNConfig, HGRNForCausalLM, HGRNModel
@@ -55,6 +60,7 @@ __all__ = [
     'DeltaNetConfig', 'DeltaNetForCausalLM', 'DeltaNetModel',
     'ForgettingTransformerConfig', 'ForgettingTransformerForCausalLM', 'ForgettingTransformerModel',
     'GatedDeltaNetConfig', 'GatedDeltaNetForCausalLM', 'GatedDeltaNetModel',
+    'GatedAttentionTransformerConfig', 'GatedAttentionTransformerForCausalLM', 'GatedAttentionTransformerModel',
     'GLAConfig', 'GLAForCausalLM', 'GLAModel',
     'GSAConfig', 'GSAForCausalLM', 'GSAModel',
     'HGRNConfig', 'HGRNForCausalLM', 'HGRNModel',

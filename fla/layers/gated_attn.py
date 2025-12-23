@@ -157,11 +157,19 @@ class GatedAttention(Attention):
             k_len = k.shape[1]
             q = q * self.s.to(q.dtype) * self.logn[k_len-q_len:k_len].to(q.dtype)
 
-        # Dispatch to gated attention implementation
-        if self.attn_impl == "naive_gated_attn" or self.attn_impl == "gated_attn":
-            o, attentions = naive_gated_attn(q, k, v, gate_score=gate_score, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        if self.attn_impl == "gated_attn" or self.attn_impl == "naive_gated_attn":
+            o, attentions = naive_gated_attn(
+                q,
+                k,
+                v,
+                gate_score=gate_score,
+                scale=self.head_dim**-0.5,
+                cu_seqlens=cu_seqlens,
+            )
         else:
-            raise ValueError(f"GatedAttention requires attn_impl='gated_attn' or 'naive_gated_attn', got '{self.attn_impl}'")
+            raise ValueError(
+                "GatedAttention only supports attn_impl='gated_attn' or 'naive_gated_attn'."
+            )
 
         o = o.reshape(batch_size, q_len, -1)
         o = self.o_proj(o)
