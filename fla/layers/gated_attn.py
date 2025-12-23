@@ -10,7 +10,7 @@ import torch.nn as nn
 from einops import rearrange
 
 from fla.layers.attn import Attention
-from fla.ops import naive_gated_attn
+from fla.ops import naive_gated_attn, parallel_gated_attn
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
@@ -157,7 +157,17 @@ class GatedAttention(Attention):
             k_len = k.shape[1]
             q = q * self.s.to(q.dtype) * self.logn[k_len-q_len:k_len].to(q.dtype)
 
-        if self.attn_impl == "gated_attn" or self.attn_impl == "naive_gated_attn":
+        if self.attn_impl == "parallel_gated_attn":
+            o = parallel_gated_attn(
+                q,
+                k,
+                v,
+                gate_score=gate_score,
+                scale=self.head_dim**-0.5,
+                cu_seqlens=cu_seqlens,
+            )
+            attentions = None
+        elif self.attn_impl == "naive_gated_attn":
             o, attentions = naive_gated_attn(
                 q,
                 k,
