@@ -3,8 +3,8 @@
 from typing import Optional
 
 import torch
-import torch.nn.functional as F
-from einops import rearrange
+
+from .parallel import parallel_attn
 
 
 def parallel_gated_attn(
@@ -16,38 +16,12 @@ def parallel_gated_attn(
     cu_seqlens: Optional[torch.LongTensor] = None,
     head_first: bool = False,
 ) -> torch.Tensor:
-    if scale is None:
-        scale = q.shape[-1] ** -0.5
-
-    if not head_first:
-        q, k, v, gate_score = map(
-            lambda x: rearrange(x, "b t h d -> b h t d"),
-            (q, k, v, gate_score),
-        )
-
-    try:
-        o = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=None,
-            dropout_p=0.0,
-            is_causal=True,
-            scale=scale,
-        )
-    except TypeError:
-        o = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=None,
-            dropout_p=0.0,
-            is_causal=True,
-        )
-
-    o = o * torch.sigmoid(gate_score)
-
-    if not head_first:
-        o = rearrange(o, "b h t d -> b t h d")
-
-    return o
+    o = parallel_attn(
+        q,
+        k,
+        v,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        head_first=head_first,
+    )
+    return o * torch.sigmoid(gate_score)
