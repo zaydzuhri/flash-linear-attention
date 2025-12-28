@@ -38,6 +38,7 @@ class GptOssSinkTransformerConfig(PretrainedConfig):
         vocab_size: int = 32000,
         attn_impl: str = "gpt_oss_flex_attention_sink",
         gpt_oss_sink: bool = True,
+        elementwise_gate: bool = False,
         **kwargs,
     ):
         self.hidden_size = hidden_size
@@ -56,6 +57,7 @@ class GptOssSinkTransformerConfig(PretrainedConfig):
 
         self.initializer_range = initializer_range
         self.elementwise_affine = elementwise_affine
+        self.elementwise_gate = elementwise_gate
         self.norm_eps = norm_eps
         self.use_cache = use_cache
 
