@@ -5,10 +5,10 @@ from typing import Optional
 from transformers.configuration_utils import PretrainedConfig
 
 
-class ReluSoftpick1TransformerConfig(PretrainedConfig):
+class SoftmaxPlusOneTransformerConfig(PretrainedConfig):
 
-    model_type = 'relu_softpick_1_transformer'
-    keys_to_ignore_at_inference = ['past_key_values']
+    model_type = "softmax_plus_one_transformer"
+    keys_to_ignore_at_inference = ["past_key_values"]
 
     def __init__(
         self,
@@ -19,7 +19,7 @@ class ReluSoftpick1TransformerConfig(PretrainedConfig):
         qkv_bias: bool = False,
         qk_norm: bool = False,
         window_size: Optional[int] = None,
-        rope_theta: Optional[float] = 10000.,
+        rope_theta: Optional[float] = 10000.0,
         max_position_embeddings: int = 2048,
         hidden_ratio: Optional[int] = 4,
         intermediate_size: Optional[int] = None,
@@ -36,7 +36,7 @@ class ReluSoftpick1TransformerConfig(PretrainedConfig):
         fuse_swiglu: bool = True,
         fuse_cross_entropy: bool = True,
         vocab_size: int = 32000,
-        attn_impl: str = "parallel_relu_softpick_1_attn",
+        attn_impl: str = "parallel_softmax_plus_one_attn",
         elementwise_gate: bool = False,
         **kwargs,
     ):

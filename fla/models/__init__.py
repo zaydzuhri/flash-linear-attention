@@ -45,6 +45,11 @@ from fla.models.relu_softpick_2_transformer import (
     ReluSoftpick2TransformerForCausalLM,
     ReluSoftpick2TransformerModel,
 )
+from fla.models.softmax_plus_one_transformer import (
+    SoftmaxPlusOneTransformerConfig,
+    SoftmaxPlusOneTransformerForCausalLM,
+    SoftmaxPlusOneTransformerModel,
+)
 from fla.models.rwkv6 import RWKV6Config, RWKV6ForCausalLM, RWKV6Model
 from fla.models.rwkv7 import RWKV7Config, RWKV7ForCausalLM, RWKV7Model
 from fla.models.samba import SambaConfig, SambaForCausalLM, SambaModel
@@ -73,6 +78,7 @@ __all__ = [
     'RetNetConfig', 'RetNetForCausalLM', 'RetNetModel',
     'ReluSoftpick1TransformerConfig', 'ReluSoftpick1TransformerForCausalLM', 'ReluSoftpick1TransformerModel',
     'ReluSoftpick2TransformerConfig', 'ReluSoftpick2TransformerForCausalLM', 'ReluSoftpick2TransformerModel',
+    'SoftmaxPlusOneTransformerConfig', 'SoftmaxPlusOneTransformerForCausalLM', 'SoftmaxPlusOneTransformerModel',
     'RWKV6Config', 'RWKV6ForCausalLM', 'RWKV6Model',
     'RWKV7Config', 'RWKV7ForCausalLM', 'RWKV7Model',
     'SambaConfig', 'SambaForCausalLM', 'SambaModel',

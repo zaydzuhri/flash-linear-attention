@@ -37,6 +37,7 @@ class ReluSoftpick2TransformerConfig(PretrainedConfig):
         fuse_cross_entropy: bool = True,
         vocab_size: int = 32000,
         attn_impl: str = "parallel_relu_softpick_2_attn",
+        elementwise_gate: bool = False,
         **kwargs,
     ):
         self.hidden_size = hidden_size
@@ -64,6 +65,7 @@ class ReluSoftpick2TransformerConfig(PretrainedConfig):
         self.vocab_size = vocab_size
 
         self.attn_impl = attn_impl
+        self.elementwise_gate = elementwise_gate
 
         super().__init__(
             pad_token_id=pad_token_id,

@@ -23,6 +23,7 @@ from fla.ops import (
     parallel_relu_softpick_2_attn,
     parallel_abs_softmax_1_attn,
     parallel_abs_softmax_2_attn,
+    parallel_softmax_plus_one_attn,
     naive_attn,
     naive_rectified_attn,
     naive_softpick_attn,
@@ -30,6 +31,7 @@ from fla.ops import (
     naive_relu_softpick_2_attn,
     naive_abs_softmax_1_attn,
     naive_abs_softmax_2_attn,
+    naive_softmax_plus_one_attn,
 )
 
 if TYPE_CHECKING:
@@ -220,6 +222,8 @@ class Attention(nn.Module):
             o = parallel_abs_softmax_1_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
         elif self.attn_impl == "parallel_abs_softmax_2_attn":
             o = parallel_abs_softmax_2_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "parallel_softmax_plus_one_attn":
+            o = parallel_softmax_plus_one_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
         elif self.attn_impl == "naive_attn":
             o, attentions = naive_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
         elif self.attn_impl == "naive_scaled_attn":
@@ -238,6 +242,8 @@ class Attention(nn.Module):
             o, attentions = naive_abs_softmax_1_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
         elif self.attn_impl == "naive_abs_softmax_2_attn":
             o, attentions = naive_abs_softmax_2_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "naive_softmax_plus_one_attn":
+            o, attentions = naive_softmax_plus_one_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
         else:
             raise ValueError(f"Unknown attention implementation: {self.attn_impl}")
 

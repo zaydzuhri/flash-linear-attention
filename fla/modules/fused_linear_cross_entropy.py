@@ -24,6 +24,7 @@ from fla.utils import input_guard
 # However, setting limit as 65536 as in LayerNorm tutorial is faster because of less register spilling
 # The optimal maximum block size depends on your hardware, your kernel, and your dtype
 MAX_FUSED_SIZE = 65536 // 2
+_FUSED_CE_NUM_WARPS = 16 if torch.version.hip is not None else 32
 
 
 @triton.jit
@@ -255,7 +256,7 @@ def fused_linear_cross_entropy_forward(
             reduction=reduction,
             V=V,
             BV=BV,
-            num_warps=32
+            num_warps=_FUSED_CE_NUM_WARPS,
         )
 
         # gradient of logits is computed in-place by the above triton kernel and is of shape: C x V
@@ -295,7 +296,7 @@ def fused_linear_cross_entropy_backward(
             g=do,
             N=N*H,
             B=B,
-            num_warps=32,
+            num_warps=_FUSED_CE_NUM_WARPS,
         )
 
         # handle dw
@@ -306,7 +307,7 @@ def fused_linear_cross_entropy_backward(
                 g=do,
                 N=V*H,
                 B=B,
-                num_warps=32,
+                num_warps=_FUSED_CE_NUM_WARPS,
             )
 
         if db is not None:
@@ -316,7 +317,7 @@ def fused_linear_cross_entropy_backward(
                 g=do,
                 N=V,
                 B=B,
-                num_warps=32,
+                num_warps=_FUSED_CE_NUM_WARPS,
             )
     return dx, dw, db
 
