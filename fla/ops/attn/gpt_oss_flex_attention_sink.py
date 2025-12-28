@@ -27,7 +27,7 @@ try:
         flex_attention as _flex_attention,
         create_block_mask as _create_block_mask,
     )
-    from torch.nn.attention.flex_attention import AuxRequest, _score_mod_signature, _mask_mod_signature
+    from torch.nn.attention.flex_attention import _score_mod_signature, _mask_mod_signature
     HAS_FLEX_ATTENTION = True
 except Exception:
     HAS_FLEX_ATTENTION = False
@@ -364,7 +364,7 @@ if HAS_FLEX_ATTENTION:
                 score_mod=None,
                 enable_gqa=enable_gqa,
                 scale=scale,
-                return_aux=AuxRequest(lse=True),
+                return_lse=True,
             )
         else:
             out = uncompiled_flex_attention(
@@ -375,10 +375,10 @@ if HAS_FLEX_ATTENTION:
                 score_mod=None,
                 enable_gqa=enable_gqa,
                 scale=scale,
-                return_aux=AuxRequest(lse=True),
+                return_lse=True,
             )
         attn_output, aux = out
-        logsumexp = aux.lse
+        logsumexp = aux
 
         sink_scale = torch.sigmoid(logsumexp - sink_weights.unsqueeze(1))
         attn_output = attn_output * sink_scale.unsqueeze(-1).to(attn_output.dtype)
@@ -404,10 +404,10 @@ if HAS_FLEX_ATTENTION:
             score_mod=None,
             enable_gqa=enable_gqa,
             scale=scale,
-            return_aux=AuxRequest(lse=True),
+            return_lse=True,
         )
         attn_output, aux = out
-        return attn_output, aux.lse
+        return attn_output, aux
 
     def flex_attention_add_sinks(
         self_attn,
