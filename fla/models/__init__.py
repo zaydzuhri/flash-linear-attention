@@ -25,6 +25,11 @@ from fla.models.gated_attention_transformer import (
     GatedAttentionTransformerForCausalLM,
     GatedAttentionTransformerModel,
 )
+from fla.models.gpt_oss_sink_transformer import (
+    GptOssSinkTransformerConfig,
+    GptOssSinkTransformerForCausalLM,
+    GptOssSinkTransformerModel,
+)
 from fla.models.gla import GLAConfig, GLAForCausalLM, GLAModel
 from fla.models.gsa import GSAConfig, GSAForCausalLM, GSAModel
 from fla.models.hgrn import HGRNConfig, HGRNForCausalLM, HGRNModel
@@ -61,6 +66,7 @@ __all__ = [
     'ForgettingTransformerConfig', 'ForgettingTransformerForCausalLM', 'ForgettingTransformerModel',
     'GatedDeltaNetConfig', 'GatedDeltaNetForCausalLM', 'GatedDeltaNetModel',
     'GatedAttentionTransformerConfig', 'GatedAttentionTransformerForCausalLM', 'GatedAttentionTransformerModel',
+    'GptOssSinkTransformerConfig', 'GptOssSinkTransformerForCausalLM', 'GptOssSinkTransformerModel',
     'GLAConfig', 'GLAForCausalLM', 'GLAModel',
     'GSAConfig', 'GSAForCausalLM', 'GSAModel',
     'HGRNConfig', 'HGRNForCausalLM', 'HGRNModel',

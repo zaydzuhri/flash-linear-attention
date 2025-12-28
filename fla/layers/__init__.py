@@ -7,6 +7,7 @@ from .based import BasedLinearAttention
 from .bitattn import BitAttention
 from .delta_net import DeltaNet
 from .forgetting_attn import ForgettingAttention
+from .gpt_oss_sink_attn import GptOssSinkAttention
 from .gated_attn import GatedAttention
 from .gated_deltanet import GatedDeltaNet
 from .gated_deltaproduct import GatedDeltaProduct
@@ -29,6 +30,7 @@ __all__ = [
     'BitAttention',
     'DeltaNet',
     'ForgettingAttention',
+    'GptOssSinkAttention',
     'GatedAttention',
     'GatedDeltaNet',
     'GatedDeltaProduct',

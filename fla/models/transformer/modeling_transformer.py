@@ -16,6 +16,7 @@ from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.attn import Attention
+from fla.layers.gpt_oss_sink_attn import GptOssSinkAttention
 from fla.layers.gated_attn import GatedAttention
 from fla.models.transformer.configuration_transformer import TransformerConfig
 from fla.models.utils import Cache
@@ -40,8 +41,26 @@ class TransformerBlock(nn.Module):
 
         self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
 
-        # Use GatedAttention when elementwise_gate is enabled, otherwise use standard Attention
-        if config.elementwise_gate:
+        use_gpt_oss_sink = bool(getattr(config, "gpt_oss_sink", False))
+        if use_gpt_oss_sink and config.elementwise_gate:
+            raise ValueError("gpt_oss_sink and elementwise_gate cannot both be enabled.")
+
+        # Use GptOssSinkAttention when gpt_oss_sink is enabled, otherwise use standard Attention
+        if use_gpt_oss_sink:
+            self.attn = GptOssSinkAttention(
+                hidden_size=config.hidden_size,
+                num_heads=config.num_heads,
+                num_kv_heads=config.num_kv_heads,
+                qkv_bias=config.qkv_bias,
+                qk_norm=config.qk_norm,
+                window_size=config.window_size,
+                rope_theta=config.rope_theta,
+                max_position_embeddings=config.max_position_embeddings,
+                layer_idx=layer_idx,
+                attn_impl=config.attn_impl,
+                initializer_range=config.initializer_range,
+            )
+        elif config.elementwise_gate:
             self.attn = GatedAttention(
                 hidden_size=config.hidden_size,
                 num_heads=config.num_heads,
