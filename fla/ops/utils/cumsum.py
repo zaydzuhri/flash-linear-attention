@@ -7,13 +7,15 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.utils.index import prepare_chunk_indices
 from fla.utils import check_shared_mem, input_guard
 
 BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'USE_OFFSETS': lambda args: args['offsets'] is not None,
+    'HAS_SCALE': lambda args: args['scale'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -26,6 +28,7 @@ BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
 def chunk_local_cumsum_scalar_kernel(
     s,
     o,
+    scale,
     offsets,
     indices,
     T,
@@ -33,7 +36,8 @@ def chunk_local_cumsum_scalar_kernel(
     BT: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
     USE_OFFSETS: tl.constexpr,
-    REVERSE: tl.constexpr
+    REVERSE: tl.constexpr,
+    HAS_SCALE: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -56,11 +60,14 @@ def chunk_local_cumsum_scalar_kernel(
     if REVERSE:
         b_z = tl.sum(b_s, axis=0)
         b_o = -b_o + b_z[None] + b_s
+    if HAS_SCALE:
+        b_o *= scale
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0,))
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'USE_OFFSETS': lambda args: args['offsets'] is not None,
+    'HAS_SCALE': lambda args: args['scale'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -74,6 +81,7 @@ def chunk_local_cumsum_scalar_kernel(
 def chunk_local_cumsum_vector_kernel(
     s,
     o,
+    scale,
     offsets,
     indices,
     T,
@@ -83,7 +91,8 @@ def chunk_local_cumsum_vector_kernel(
     BS: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
     USE_OFFSETS: tl.constexpr,
-    REVERSE: tl.constexpr
+    REVERSE: tl.constexpr,
+    HAS_SCALE: tl.constexpr,
 ):
     i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -109,6 +118,8 @@ def chunk_local_cumsum_vector_kernel(
     # [BT, BS]
     b_s = tl.load(p_s, boundary_check=(0, 1)).to(tl.float32)
     b_o = tl.dot(m_s, b_s, allow_tf32=False)
+    if HAS_SCALE:
+        b_o *= scale
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
 
@@ -230,8 +241,18 @@ def chunk_local_cumsum_scalar(
     offsets: Optional[torch.Tensor] = None,
     indices: Optional[torch.Tensor] = None,
     head_first: bool = True,
-    output_dtype: Optional[torch.dtype] = torch.float
+    output_dtype: Optional[torch.dtype] = torch.float,
+    scale: float | None = None,
+    cu_seqlens: torch.Tensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
+    if offsets is None and cu_seqlens is not None:
+        offsets = cu_seqlens
+    if indices is None:
+        if chunk_indices is not None:
+            indices = chunk_indices
+        elif offsets is not None:
+            indices = prepare_chunk_indices(offsets, chunk_size)
     if head_first:
         B, H, T = g.shape
     else:
@@ -246,6 +267,7 @@ def chunk_local_cumsum_scalar(
     chunk_local_cumsum_scalar_kernel[grid](
         g_org,
         g,
+        scale,
         offsets,
         indices,
         T=T,
@@ -264,8 +286,18 @@ def chunk_local_cumsum_vector(
     offsets: Optional[torch.Tensor] = None,
     indices: Optional[torch.Tensor] = None,
     head_first: bool = True,
-    output_dtype: Optional[torch.dtype] = torch.float
+    output_dtype: Optional[torch.dtype] = torch.float,
+    scale: float | None = None,
+    cu_seqlens: torch.Tensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
+    if offsets is None and cu_seqlens is not None:
+        offsets = cu_seqlens
+    if indices is None:
+        if chunk_indices is not None:
+            indices = chunk_indices
+        elif offsets is not None:
+            indices = prepare_chunk_indices(offsets, chunk_size)
     if head_first:
         B, H, T, S = g.shape
     else:
@@ -282,6 +314,7 @@ def chunk_local_cumsum_vector(
     chunk_local_cumsum_vector_kernel[grid](
         g_org,
         g,
+        scale,
         offsets,
         indices,
         T=T,
@@ -386,14 +419,47 @@ def chunk_local_cumsum(
     offsets: Optional[torch.Tensor] = None,
     indices: Optional[torch.Tensor] = None,
     head_first: bool = True,
-    output_dtype: Optional[torch.dtype] = torch.float
+    output_dtype: Optional[torch.dtype] = torch.float,
+    scale: float | None = None,
+    cu_seqlens: torch.Tensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+    **kwargs,
 ) -> torch.Tensor:
+    if offsets is None and cu_seqlens is not None:
+        offsets = cu_seqlens
+    if indices is None:
+        if chunk_indices is not None:
+            indices = chunk_indices
+        elif offsets is not None:
+            indices = prepare_chunk_indices(offsets, chunk_size)
     if offsets is not None:
         assert g.shape[0] == 1, "Only batch size 1 is supported when offsets are provided"
     if len(g.shape) == 3:
-        return chunk_local_cumsum_scalar(g, chunk_size, reverse, offsets, indices, head_first, output_dtype)
+        return chunk_local_cumsum_scalar(
+            g,
+            chunk_size,
+            reverse,
+            offsets,
+            indices,
+            head_first,
+            output_dtype,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+        )
     elif len(g.shape) == 4:
-        return chunk_local_cumsum_vector(g, chunk_size, reverse, offsets, indices, head_first, output_dtype)
+        return chunk_local_cumsum_vector(
+            g,
+            chunk_size,
+            reverse,
+            offsets,
+            indices,
+            head_first,
+            output_dtype,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+        )
     else:
         raise ValueError(f"Unsupported input shape {g.shape}. "
                          f"which should be (B, H, T, dim) if `head_first=True` "

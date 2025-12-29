@@ -689,6 +689,7 @@ def chunk_kda_bwd_intra(
         reverse=True,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        head_first=False,
     )
 
     return dq, dk, db, dg

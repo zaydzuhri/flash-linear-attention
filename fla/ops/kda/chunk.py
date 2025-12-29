@@ -207,7 +207,8 @@ class ChunkKDAFunction(torch.autograd.Function):
             chunk_size=chunk_size,
             scale=RCP_LN2,
             cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices
+            chunk_indices=chunk_indices,
+            head_first=False,
         )
         o, Aqk, Akk, final_state = chunk_kda_fwd(
             q=q,
@@ -254,7 +255,8 @@ class ChunkKDAFunction(torch.autograd.Function):
                 chunk_size=ctx.chunk_size,
                 scale=RCP_LN2,
                 cu_seqlens=cu_seqlens,
-                chunk_indices=chunk_indices
+                chunk_indices=chunk_indices,
+                head_first=False,
             )
         dq, dk, dv, db, dg, dh0 = chunk_kda_bwd(
             q=q,
