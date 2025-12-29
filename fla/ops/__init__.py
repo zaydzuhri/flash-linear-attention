@@ -15,6 +15,7 @@ from .generalized_delta_rule import (
 from .gla import chunk_gla, fused_chunk_gla, fused_recurrent_gla
 from .gsa import chunk_gsa, fused_recurrent_gsa
 from .hgrn import fused_recurrent_hgrn
+from .kda import chunk_kda, fused_recurrent_kda
 from .lightning_attn import chunk_lightning_attn, fused_recurrent_lightning_attn
 from .linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fused_recurrent_linear_attn
 from .nsa import parallel_nsa
@@ -35,6 +36,7 @@ __all__ = [
     'chunk_gla', 'fused_chunk_gla', 'fused_recurrent_gla',
     'chunk_gsa', 'fused_recurrent_gsa',
     'fused_recurrent_hgrn',
+    'chunk_kda', 'fused_recurrent_kda',
     'chunk_lightning_attn', 'fused_recurrent_lightning_attn',
     'chunk_linear_attn', 'fused_chunk_linear_attn', 'fused_recurrent_linear_attn',
     'parallel_nsa',

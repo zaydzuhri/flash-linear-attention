@@ -2,6 +2,7 @@
 
 import contextlib
 import functools
+import inspect
 import os
 from enum import Enum
 from functools import lru_cache
@@ -10,6 +11,11 @@ from typing import Any, Callable, Dict, Literal, Optional, Tuple
 import torch
 import triton
 from packaging import version
+
+FLA_CACHE_RESULTS = os.getenv('FLA_CACHE_RESULTS', '1') == '1'
+FLA_DISABLE_TENSOR_CACHE = os.getenv('FLA_DISABLE_TENSOR_CACHE', '0') == '1'
+SUPPORTS_AUTOTUNE_CACHE = "cache_results" in inspect.signature(triton.autotune).parameters
+autotune_cache_kwargs = {"cache_results": FLA_CACHE_RESULTS} if SUPPORTS_AUTOTUNE_CACHE else {}
 
 
 def tensor_cache(
@@ -37,6 +43,9 @@ def tensor_cache(
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         nonlocal last_args, last_kwargs, last_result
+
+        if FLA_DISABLE_TENSOR_CACHE:
+            return fn(*args, **kwargs)
 
         if last_args is not None and last_kwargs is not None:
             if len(args) == len(last_args) and len(kwargs) == len(last_kwargs):
@@ -170,6 +179,16 @@ use_cuda_graph = (is_nvidia and os.environ.get('FLA_USE_CUDA_GRAPH', '0') == '1'
 # Nvidia Ampere or newer, haven't check AMD and intel yet.
 is_tf32_supported = (is_nvidia and torch.cuda.get_device_capability(0)[0] >= 8)
 is_gather_supported = hasattr(triton.language, 'gather')
+
+# Uppercase aliases for upstream compatibility.
+IS_AMD = is_amd
+IS_INTEL = is_intel
+IS_NVIDIA = is_nvidia
+IS_INTEL_ALCHEMIST = is_intel_alchemist
+IS_NVIDIA_HOPPER = is_nvidia_hopper
+IS_TF32_SUPPORTED = is_tf32_supported
+USE_CUDA_GRAPH = use_cuda_graph
+IS_GATHER_SUPPORTED = is_gather_supported
 
 
 def get_all_max_shared_mem():

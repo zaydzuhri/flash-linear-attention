@@ -84,6 +84,8 @@ def seq_to_top(
         
     B, T_total = seq.shape
     T = T_total - window_size
+
+    print(f"{T = }, {B = }")
     
     assert T > 0, "T_total must be greater than window_size to produce valid output."
     
