@@ -70,6 +70,36 @@ class GptOssSinkAttention(nn.Module):
     def reset_parameters(self) -> None:
         nn.init.normal_(self.sinks, mean=0.0, std=self.initializer_range)
 
+    def _naive_attention_with_sink(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        q_len = q.shape[-2]
+        k_len = k.shape[-2]
+
+        attn_logits = torch.matmul(q, k.transpose(2, 3)) * self.scaling
+        causal_mask = torch.tril(
+            torch.ones(k_len, k_len, device=attn_logits.device, dtype=torch.bool)
+        )
+        causal_mask = causal_mask[k_len - q_len : k_len, :k_len]
+        if self.window_size is not None:
+            q_idx = torch.arange(k_len - q_len, k_len, device=attn_logits.device)
+            k_idx = torch.arange(k_len, device=attn_logits.device)
+            window_mask = k_idx[None, :] >= (q_idx[:, None] - (self.window_size - 1))
+            causal_mask = causal_mask & window_mask
+        attn_logits = attn_logits.masked_fill(~causal_mask, float("-inf"))
+
+        sinks = self.sinks.view(1, -1, 1, 1).to(attn_logits.dtype)
+        sinks = sinks.expand(attn_logits.shape[0], -1, q_len, 1)
+        combined_logits = torch.cat([attn_logits, sinks], dim=-1)
+        combined_logits = combined_logits - combined_logits.max(dim=-1, keepdim=True).values
+        attn_probs = torch.softmax(combined_logits.float(), dim=-1).to(q.dtype)
+        attn_probs = attn_probs[..., :-1]
+        o = torch.matmul(attn_probs, v)
+        return o, attn_probs
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -79,8 +109,6 @@ class GptOssSinkAttention(nn.Module):
         use_cache: bool = False,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        if not HAS_FLEX_ATTENTION:
-            raise RuntimeError("flex_attention is not available in this PyTorch build.")
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
                 "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
@@ -129,30 +157,34 @@ class GptOssSinkAttention(nn.Module):
                 k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
                 v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
 
-        if self.attn_impl != "gpt_oss_flex_attention_sink":
-            raise ValueError(f"Unknown attention implementation: {self.attn_impl}")
-
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        o = flex_attention_with_sink(
-            self,
-            q,
-            k,
-            v,
-            attention_mask=attention_mask,
-            scale=self.scaling,
-            sliding_window=self.window_size,
-            compile=True,
-            has_static_cache=True,
-        )
+        if self.attn_impl == "gpt_oss_flex_attention_sink":
+            if not HAS_FLEX_ATTENTION:
+                raise RuntimeError("flex_attention is not available in this PyTorch build.")
+            o = flex_attention_with_sink(
+                self,
+                q,
+                k,
+                v,
+                attention_mask=attention_mask,
+                scale=self.scaling,
+                sliding_window=self.window_size,
+                compile=True,
+                has_static_cache=True,
+            )
+            attentions = None
+        elif self.attn_impl == "gpt_oss_naive_sink":
+            o, attentions = self._naive_attention_with_sink(q, k, v)
+        else:
+            raise ValueError(f"Unknown attention implementation: {self.attn_impl}")
 
         o = o.reshape(batch_size, q_len, -1)
         o = self.o_proj(o)
 
-        attentions = None
-        if output_attentions:
+        if not output_attentions:
             attentions = None
 
         return o, attentions, past_key_values
