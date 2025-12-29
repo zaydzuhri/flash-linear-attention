@@ -42,12 +42,13 @@ def chunk_kda_fwd(
         k=kg,
         w=w,
         u=u,
-        gk=g,
+        g=g,
         initial_state=initial_state,
         output_final_state=output_final_state,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices,
-        use_exp2=True,
+        offsets=cu_seqlens,
+        indices=chunk_indices,
+        head_first=False,
+        chunk_size=chunk_size,
     )
 
     o = chunk_gla_fwd_o_gk(
@@ -57,10 +58,10 @@ def chunk_kda_fwd(
         A=Aqk,
         h=h,
         scale=scale,
-        cu_seqlens=cu_seqlens,
+        offsets=cu_seqlens,
+        indices=chunk_indices,
+        head_first=False,
         chunk_size=chunk_size,
-        chunk_indices=chunk_indices,
-        use_exp2=True,
     )
     return o, Aqk, Akk, final_state
 
@@ -97,12 +98,13 @@ def chunk_kda_bwd(
         k=kg,
         w=w,
         u=u,
-        gk=g,
+        g=g,
         initial_state=initial_state,
         output_final_state=False,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices,
-        use_exp2=True,
+        offsets=cu_seqlens,
+        indices=chunk_indices,
+        head_first=False,
+        chunk_size=chunk_size,
     )
     # dAqk = do @ v.T
     # dv = A @ do
@@ -122,15 +124,16 @@ def chunk_kda_bwd(
         q=qg,
         k=kg,
         w=w,
-        gk=g,
+        g=g,
         h0=initial_state,
         dht=dht,
         do=do,
         dv=dv,
         scale=scale,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices,
-        use_exp2=True,
+        offsets=cu_seqlens,
+        indices=chunk_indices,
+        head_first=False,
+        chunk_size=chunk_size,
     )
     dq, dk, dv, db, dg, dAkk = chunk_kda_bwd_wy_dqkg_fused(
         q=q,

@@ -101,7 +101,7 @@ def fused_recurrent_kda(
         q=q,
         k=k,
         v=v,
-        gk=g,
+        g=g,
         beta=beta,
         scale=scale,
         initial_state=initial_state,
