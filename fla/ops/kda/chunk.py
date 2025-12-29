@@ -3,7 +3,7 @@
 import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
-from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
+from fla.ops.kda.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.gla.chunk import chunk_gla_fwd_o_gk
 from fla.ops.kda.chunk_bwd import chunk_kda_bwd_dAv, chunk_kda_bwd_wy_dqkg_fused
 from fla.ops.kda.chunk_intra import chunk_kda_bwd_intra, chunk_kda_fwd_intra
@@ -42,13 +42,14 @@ def chunk_kda_fwd(
         k=kg,
         w=w,
         u=u,
-        g=g,
+        g=None,
+        gk=g,
         initial_state=initial_state,
         output_final_state=output_final_state,
-        offsets=cu_seqlens,
-        indices=chunk_indices,
-        head_first=False,
         chunk_size=chunk_size,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        use_exp2=True,
     )
 
     o = chunk_gla_fwd_o_gk(
@@ -98,13 +99,14 @@ def chunk_kda_bwd(
         k=kg,
         w=w,
         u=u,
-        g=g,
+        g=None,
+        gk=g,
         initial_state=initial_state,
         output_final_state=False,
-        offsets=cu_seqlens,
-        indices=chunk_indices,
-        head_first=False,
         chunk_size=chunk_size,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        use_exp2=True,
     )
     # dAqk = do @ v.T
     # dv = A @ do
@@ -124,16 +126,17 @@ def chunk_kda_bwd(
         q=qg,
         k=kg,
         w=w,
-        g=g,
-        h0=initial_state,
-        dht=dht,
         do=do,
         dv=dv,
+        g=None,
+        gk=g,
+        h0=initial_state,
+        dht=dht,
         scale=scale,
-        offsets=cu_seqlens,
-        indices=chunk_indices,
-        head_first=False,
+        cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
+        use_exp2=True,
     )
     dq, dk, dv, db, dg, dAkk = chunk_kda_bwd_wy_dqkg_fused(
         q=q,
