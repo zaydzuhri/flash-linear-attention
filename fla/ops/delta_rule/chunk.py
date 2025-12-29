@@ -187,12 +187,10 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
         T = q.shape[2] if head_first else q.shape[1]
         chunk_size = min(64, max(triton.next_power_of_2(T), 16))
 
-        q_orig = q
-        k_orig = k
-
+        q_rstd, k_rstd = None, None
         if use_qk_l2norm_in_kernel:
-            q = l2norm_fwd(q)
-            k = l2norm_fwd(k)
+            q, q_rstd = l2norm_fwd(q)
+            k, k_rstd = l2norm_fwd(k)
 
         # 2-d indices denoting the offsets of chunks in each sequence
         # for example, if the passed `offsets` is [0, 100, 356] and `chunk_size` is 64,
@@ -213,7 +211,7 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
             head_first=head_first,
             chunk_size=chunk_size
         )
-        ctx.save_for_backward(q_orig, k_orig, v, beta, A, initial_state)
+        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, beta, A, initial_state)
         ctx.chunk_size = chunk_size
         ctx.scale = scale
         ctx.offsets = offsets
@@ -230,11 +228,7 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
         do: torch.Tensor,
         dht: torch.Tensor
     ):
-        q, k, v, beta, A, initial_state = ctx.saved_tensors
-        use_qk_l2norm_in_kernel = ctx.use_qk_l2norm_in_kernel
-        if use_qk_l2norm_in_kernel:
-            q, q_orig = l2norm_fwd(q), q
-            k, k_orig = l2norm_fwd(k), k
+        q, q_rstd, k, k_rstd, v, beta, A, initial_state = ctx.saved_tensors
 
         dq, dk, dv, db, dh0 = chunk_delta_rule_bwd(
             q=q,
@@ -251,9 +245,9 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
             head_first=ctx.head_first,
             chunk_size=ctx.chunk_size
         )
-        if use_qk_l2norm_in_kernel:
-            dq = l2norm_bwd(q_orig, dq)
-            dk = l2norm_bwd(k_orig, dk)
+        if ctx.use_qk_l2norm_in_kernel:
+            dq = l2norm_bwd(q, q_rstd, dq)
+            dk = l2norm_bwd(k, k_rstd, dk)
         return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), db.to(beta.dtype), None, dh0, None, None, None, None, None, None
 
 

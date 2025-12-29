@@ -197,12 +197,10 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         use_qk_l2norm_in_kernel: bool = False
     ):
         chunk_size = 64
-        q_orig = q
-        k_orig = k
-
+        q_rstd, k_rstd = None, None
         if use_qk_l2norm_in_kernel:
-            q = l2norm_fwd(q)
-            k = l2norm_fwd(k)
+            q, q_rstd = l2norm_fwd(q)
+            k, k_rstd = l2norm_fwd(k)
 
         # 2-d indices denoting the offsets of chunks in each sequence
         # for example, if the passed `offsets` is [0, 100, 356] and `chunk_size` is 64,
@@ -227,7 +225,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             head_first=head_first,
             chunk_size=chunk_size,
         )
-        ctx.save_for_backward(q_orig, k_orig, v, g, beta, Aw, Au, initial_state, offsets, indices)
+        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, g, beta, Aw, Au, initial_state, offsets, indices)
         ctx.chunk_size = chunk_size
         ctx.scale = scale
         ctx.head_first = head_first
@@ -242,10 +240,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         do: torch.Tensor,
         dht: torch.Tensor
     ):
-        q, k, v, g, beta, Aw, Au, initial_state, offsets, indices = ctx.saved_tensors
-        if ctx.use_qk_l2norm_in_kernel:
-            q, q_orig = l2norm_fwd(q), q
-            k, k_orig = l2norm_fwd(k), k
+        (q, q_rstd, k, k_rstd, v, g, beta, Aw, Au, initial_state, offsets, indices) = ctx.saved_tensors
         dq, dk, dv, db, dg, dh0 = chunk_gated_delta_rule_bwd(
             q=q,
             k=k,
@@ -264,8 +259,8 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             chunk_size=ctx.chunk_size
         )
         if ctx.use_qk_l2norm_in_kernel:
-            dq = l2norm_bwd(q_orig, dq)
-            dk = l2norm_bwd(k_orig, dk)
+            dq = l2norm_bwd(q, q_rstd, dq)
+            dk = l2norm_bwd(k, k_rstd, dk)
         return dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta), None, dh0, None, None, None, None
 
 

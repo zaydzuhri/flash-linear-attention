@@ -441,12 +441,10 @@ class FusedRecurrentFunction(torch.autograd.Function):
         head_first: bool = True,
         use_qk_l2norm_in_kernel: bool = False
     ):
-        q_orig = q
-        k_orig = k
-
+        q_rstd, k_rstd = None, None
         if use_qk_l2norm_in_kernel:
-            q = l2norm_fwd(q)
-            k = l2norm_fwd(k)
+            q, q_rstd = l2norm_fwd(q)
+            k, k_rstd = l2norm_fwd(k)
 
         o, u, final_state = fused_recurrent_delta_rule_fwd(
             q=q,
@@ -460,7 +458,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
             head_first=head_first
         )
 
-        ctx.save_for_backward(q_orig, k_orig, u, beta, initial_state)
+        ctx.save_for_backward(q, q_rstd, k, k_rstd, u, beta, initial_state)
         ctx.scale = scale
         ctx.offsets = offsets
         ctx.head_first = head_first
@@ -470,10 +468,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     def backward(ctx, do, dht):
-        q, k, v, beta, initial_state = ctx.saved_tensors
-        if ctx.use_qk_l2norm_in_kernel:
-            q, q_orig = l2norm_fwd(q), q
-            k, k_orig = l2norm_fwd(k), k
+        q, q_rstd, k, k_rstd, v, beta, initial_state = ctx.saved_tensors
         dq, dk, dv, db, dh0 = fused_recurrent_delta_rule_bwd(
             q=q,
             k=k,
@@ -487,7 +482,8 @@ class FusedRecurrentFunction(torch.autograd.Function):
             head_first=ctx.head_first
         )
         if ctx.use_qk_l2norm_in_kernel:
-            dq, dk = l2norm_bwd(q_orig, dq), l2norm_bwd(k_orig, dk)
+            dq = l2norm_bwd(q, q_rstd, dq)
+            dk = l2norm_bwd(k, k_rstd, dk)
         return dq.to(q), dk.to(k), dv.to(v), db.to(beta), None, dh0, None, None, None, None
 
 
