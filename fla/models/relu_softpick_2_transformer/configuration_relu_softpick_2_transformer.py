@@ -5,9 +5,9 @@ from typing import Optional
 from transformers.configuration_utils import PretrainedConfig
 
 
-class TransformerConfig(PretrainedConfig):
+class ReluSoftpick2TransformerConfig(PretrainedConfig):
 
-    model_type = 'transformer'
+    model_type = 'relu_softpick_2_transformer'
     keys_to_ignore_at_inference = ['past_key_values']
 
     def __init__(
@@ -36,7 +36,7 @@ class TransformerConfig(PretrainedConfig):
         fuse_swiglu: bool = True,
         fuse_cross_entropy: bool = True,
         vocab_size: int = 32000,
-        attn_impl: str = "flash_attn", # {flash_attn, parallel_attn, parallel_rectified_attn}, parallel_attn and parallel_rectified_attn are the fla.ops implementations which don't support inference
+        attn_impl: str = "parallel_relu_softpick_2_attn",
         elementwise_gate: bool = False,
         **kwargs,
     ):

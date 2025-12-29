@@ -5,10 +5,10 @@ from typing import Optional
 from transformers.configuration_utils import PretrainedConfig
 
 
-class TransformerConfig(PretrainedConfig):
+class GptOssSinkTransformerConfig(PretrainedConfig):
 
-    model_type = 'transformer'
-    keys_to_ignore_at_inference = ['past_key_values']
+    model_type = "gpt_oss_sink_transformer"
+    keys_to_ignore_at_inference = ["past_key_values"]
 
     def __init__(
         self,
@@ -19,7 +19,7 @@ class TransformerConfig(PretrainedConfig):
         qkv_bias: bool = False,
         qk_norm: bool = False,
         window_size: Optional[int] = None,
-        rope_theta: Optional[float] = 10000.,
+        rope_theta: Optional[float] = 10000.0,
         max_position_embeddings: int = 2048,
         hidden_ratio: Optional[int] = 4,
         intermediate_size: Optional[int] = None,
@@ -36,7 +36,8 @@ class TransformerConfig(PretrainedConfig):
         fuse_swiglu: bool = True,
         fuse_cross_entropy: bool = True,
         vocab_size: int = 32000,
-        attn_impl: str = "flash_attn", # {flash_attn, parallel_attn, parallel_rectified_attn}, parallel_attn and parallel_rectified_attn are the fla.ops implementations which don't support inference
+        attn_impl: str = "gpt_oss_flex_attention_sink",
+        gpt_oss_sink: bool = True,
         elementwise_gate: bool = False,
         **kwargs,
     ):
@@ -56,6 +57,7 @@ class TransformerConfig(PretrainedConfig):
 
         self.initializer_range = initializer_range
         self.elementwise_affine = elementwise_affine
+        self.elementwise_gate = elementwise_gate
         self.norm_eps = norm_eps
         self.use_cache = use_cache
 
@@ -65,7 +67,7 @@ class TransformerConfig(PretrainedConfig):
         self.vocab_size = vocab_size
 
         self.attn_impl = attn_impl
-        self.elementwise_gate = elementwise_gate
+        self.gpt_oss_sink = gpt_oss_sink
 
         super().__init__(
             pad_token_id=pad_token_id,
@@ -74,3 +76,6 @@ class TransformerConfig(PretrainedConfig):
             tie_word_embeddings=tie_word_embeddings,
             **kwargs,
         )
+
+
+__all__ = ["GptOssSinkTransformerConfig"]

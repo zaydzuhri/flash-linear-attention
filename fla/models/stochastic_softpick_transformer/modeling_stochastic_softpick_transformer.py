@@ -15,10 +15,8 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
-from fla.layers.attn import Attention
-from fla.layers.gpt_oss_sink_attn import GptOssSinkAttention
-from fla.layers.gated_attn import GatedAttention
-from fla.models.transformer.configuration_transformer import TransformerConfig
+from fla.layers.attn import Attention, StochasticSoftpickAttention
+from fla.models.stochastic_softpick_transformer.configuration_stochastic_softpick_transformer import StochasticSoftpickTransformerConfig
 from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as TransformerMLP
@@ -33,59 +31,26 @@ logger = logging.get_logger(__name__)
 
 class TransformerBlock(nn.Module):
 
-    def __init__(self, config: TransformerConfig, layer_idx: int):
+    def __init__(self, config: StochasticSoftpickTransformerConfig, layer_idx: int):
         super().__init__()
 
         self.config = config
         self.layer_idx = layer_idx
 
         self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
-
-        use_gpt_oss_sink = bool(getattr(config, "gpt_oss_sink", False))
-        if use_gpt_oss_sink and config.elementwise_gate:
-            raise ValueError("gpt_oss_sink and elementwise_gate cannot both be enabled.")
-
-        # Use GptOssSinkAttention when gpt_oss_sink is enabled, otherwise use standard Attention
-        if use_gpt_oss_sink:
-            self.attn = GptOssSinkAttention(
-                hidden_size=config.hidden_size,
-                num_heads=config.num_heads,
-                num_kv_heads=config.num_kv_heads,
-                qkv_bias=config.qkv_bias,
-                qk_norm=config.qk_norm,
-                window_size=config.window_size,
-                rope_theta=config.rope_theta,
-                max_position_embeddings=config.max_position_embeddings,
-                layer_idx=layer_idx,
-                attn_impl=config.attn_impl,
-                initializer_range=config.initializer_range,
-            )
-        elif config.elementwise_gate:
-            self.attn = GatedAttention(
-                hidden_size=config.hidden_size,
-                num_heads=config.num_heads,
-                num_kv_heads=config.num_kv_heads,
-                qkv_bias=config.qkv_bias,
-                qk_norm=config.qk_norm,
-                window_size=config.window_size,
-                rope_theta=config.rope_theta,
-                max_position_embeddings=config.max_position_embeddings,
-                layer_idx=layer_idx,
-                attn_impl=config.attn_impl,
-            )
-        else:
-            self.attn = Attention(
-                hidden_size=config.hidden_size,
-                num_heads=config.num_heads,
-                num_kv_heads=config.num_kv_heads,
-                qkv_bias=config.qkv_bias,
-                qk_norm=config.qk_norm,
-                window_size=config.window_size,
-                rope_theta=config.rope_theta,
-                max_position_embeddings=config.max_position_embeddings,
-                layer_idx=layer_idx,
-                attn_impl=config.attn_impl,
-            )
+        self.attn = StochasticSoftpickAttention(
+            hidden_size=config.hidden_size,
+            num_heads=config.num_heads,
+            num_kv_heads=config.num_kv_heads,
+            qkv_bias=config.qkv_bias,
+            qk_norm=config.qk_norm,
+            window_size=config.window_size,
+            rope_theta=config.rope_theta,
+            max_position_embeddings=config.max_position_embeddings,
+            layer_idx=layer_idx,
+            attn_impl=config.attn_impl,
+            stochastic_p=config.stochastic_p
+        )
 
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
         self.mlp = TransformerMLP(
@@ -138,7 +103,7 @@ class TransformerBlock(nn.Module):
 
 class TransformerPreTrainedModel(PreTrainedModel):
 
-    config_class = TransformerConfig
+    config_class = StochasticSoftpickTransformerConfig
     base_model_prefix = 'model'
     supports_gradient_checkpointing = True
     _no_split_modules = ['TransformerBlock']
@@ -186,12 +151,12 @@ class TransformerPreTrainedModel(PreTrainedModel):
                     p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
 
 
-class TransformerModel(TransformerPreTrainedModel):
+class StochasticSoftpickTransformerModel(TransformerPreTrainedModel):
 
     def __init__(
         self,
-        config: TransformerConfig
-    ) -> TransformerModel:
+        config: StochasticSoftpickTransformerConfig
+    ) -> StochasticSoftpickTransformerModel:
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -307,13 +272,13 @@ class TransformerModel(TransformerPreTrainedModel):
         )
 
 
-class TransformerForCausalLM(TransformerPreTrainedModel, GenerationMixin):
+class StochasticSoftpickTransformerForCausalLM(TransformerPreTrainedModel, GenerationMixin):
 
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
         super().__init__(config)
-        self.model = TransformerModel(config)
+        self.model = StochasticSoftpickTransformerModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.criterion = None
@@ -424,7 +389,6 @@ class TransformerForCausalLM(TransformerPreTrainedModel, GenerationMixin):
             # Enable model parallelism
             labels = labels.to(hidden_states.device)
             labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-            labels = labels[..., :hidden_states.shape[1]].contiguous()
             if fuse_linear_and_cross_entropy:
                 loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
             else:

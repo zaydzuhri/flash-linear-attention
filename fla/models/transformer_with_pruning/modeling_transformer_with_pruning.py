@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import math
 import warnings
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
@@ -16,9 +17,7 @@ from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.attn import Attention
-from fla.layers.gpt_oss_sink_attn import GptOssSinkAttention
-from fla.layers.gated_attn import GatedAttention
-from fla.models.transformer.configuration_transformer import TransformerConfig
+from fla.models.transformer_with_pruning.configuration_transformer_with_pruning import TransformerWithPruningConfig
 from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as TransformerMLP
@@ -33,59 +32,25 @@ logger = logging.get_logger(__name__)
 
 class TransformerBlock(nn.Module):
 
-    def __init__(self, config: TransformerConfig, layer_idx: int):
+    def __init__(self, config: TransformerWithPruningConfig, layer_idx: int):
         super().__init__()
 
         self.config = config
         self.layer_idx = layer_idx
 
         self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
-
-        use_gpt_oss_sink = bool(getattr(config, "gpt_oss_sink", False))
-        if use_gpt_oss_sink and config.elementwise_gate:
-            raise ValueError("gpt_oss_sink and elementwise_gate cannot both be enabled.")
-
-        # Use GptOssSinkAttention when gpt_oss_sink is enabled, otherwise use standard Attention
-        if use_gpt_oss_sink:
-            self.attn = GptOssSinkAttention(
-                hidden_size=config.hidden_size,
-                num_heads=config.num_heads,
-                num_kv_heads=config.num_kv_heads,
-                qkv_bias=config.qkv_bias,
-                qk_norm=config.qk_norm,
-                window_size=config.window_size,
-                rope_theta=config.rope_theta,
-                max_position_embeddings=config.max_position_embeddings,
-                layer_idx=layer_idx,
-                attn_impl=config.attn_impl,
-                initializer_range=config.initializer_range,
-            )
-        elif config.elementwise_gate:
-            self.attn = GatedAttention(
-                hidden_size=config.hidden_size,
-                num_heads=config.num_heads,
-                num_kv_heads=config.num_kv_heads,
-                qkv_bias=config.qkv_bias,
-                qk_norm=config.qk_norm,
-                window_size=config.window_size,
-                rope_theta=config.rope_theta,
-                max_position_embeddings=config.max_position_embeddings,
-                layer_idx=layer_idx,
-                attn_impl=config.attn_impl,
-            )
-        else:
-            self.attn = Attention(
-                hidden_size=config.hidden_size,
-                num_heads=config.num_heads,
-                num_kv_heads=config.num_kv_heads,
-                qkv_bias=config.qkv_bias,
-                qk_norm=config.qk_norm,
-                window_size=config.window_size,
-                rope_theta=config.rope_theta,
-                max_position_embeddings=config.max_position_embeddings,
-                layer_idx=layer_idx,
-                attn_impl=config.attn_impl,
-            )
+        self.attn = Attention(
+            hidden_size=config.hidden_size,
+            num_heads=config.num_heads,
+            num_kv_heads=config.num_kv_heads,
+            qkv_bias=config.qkv_bias,
+            qk_norm=config.qk_norm,
+            window_size=config.window_size,
+            rope_theta=config.rope_theta,
+            max_position_embeddings=config.max_position_embeddings,
+            layer_idx=layer_idx,
+            attn_impl=config.attn_impl
+        )
 
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
         self.mlp = TransformerMLP(
@@ -138,7 +103,7 @@ class TransformerBlock(nn.Module):
 
 class TransformerPreTrainedModel(PreTrainedModel):
 
-    config_class = TransformerConfig
+    config_class = TransformerWithPruningConfig
     base_model_prefix = 'model'
     supports_gradient_checkpointing = True
     _no_split_modules = ['TransformerBlock']
@@ -186,12 +151,12 @@ class TransformerPreTrainedModel(PreTrainedModel):
                     p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
 
 
-class TransformerModel(TransformerPreTrainedModel):
+class TransformerWithPruningModel(TransformerPreTrainedModel):
 
     def __init__(
         self,
-        config: TransformerConfig
-    ) -> TransformerModel:
+        config: TransformerWithPruningConfig
+    ) -> TransformerWithPruningModel:
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -307,16 +272,21 @@ class TransformerModel(TransformerPreTrainedModel):
         )
 
 
-class TransformerForCausalLM(TransformerPreTrainedModel, GenerationMixin):
+class TransformerWithPruningForCausalLM(TransformerPreTrainedModel, GenerationMixin):
 
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
         super().__init__(config)
-        self.model = TransformerModel(config)
+        self.model = TransformerWithPruningModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.criterion = None
+        self.hook_handles = None
+
+        if config.layer_head_pruned is not None:
+            print("Pruning heads...")
+            self.hook_handles = self.prune_head(self.model)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -424,7 +394,6 @@ class TransformerForCausalLM(TransformerPreTrainedModel, GenerationMixin):
             # Enable model parallelism
             labels = labels.to(hidden_states.device)
             labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-            labels = labels[..., :hidden_states.shape[1]].contiguous()
             if fuse_linear_and_cross_entropy:
                 loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
             else:
@@ -441,3 +410,67 @@ class TransformerForCausalLM(TransformerPreTrainedModel, GenerationMixin):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+
+    @staticmethod
+    def create_pruning_hook(
+        layer_idx_to_prune: int, 
+        head_idx_to_prune: int, 
+        num_heads: int, 
+        head_dim: int,
+        module_base_name: str,
+        current_module_name: str
+    ):
+        def pruning_hook(module, input_tensor, output_tensor):
+            if module_base_name not in ["q_proj", "k_proj", "v_proj"]:
+                return output_tensor
+
+            original_shape = output_tensor.shape
+            batch_size, seq_len, _ = original_shape
+
+            reshaped_output = output_tensor.view(batch_size, seq_len, num_heads, head_dim)
+
+            # THIS MAKES BOTH GRADIENT AND FORWARD PASS TO BE ZERO
+            # REMOVE IF ONLY WANTS THE OUTPUT
+            reshaped_output[:, :, head_idx_to_prune, :] = 0.0
+
+            return reshaped_output.view(batch_size, seq_len, -1)
+
+        return pruning_hook
+
+    def prune_head(self, model):
+        head_prune_targets = ["q_proj", "v_proj", "k_proj", "o_proj"]
+        hook_handles = []
+        num_heads = model.config.num_heads
+        hidden_size = model.config.hidden_size
+        head_dim = hidden_size // num_heads
+
+        def extract_layers_number(name: str) -> int:
+            match = re.search(r"layers\.(\d+)", name)
+            if match:
+                return int(match.group(1))
+            else:
+                return -1
+
+
+        from torch import nn
+
+        for name, module in model.named_modules():
+            if isinstance(module, nn.Linear):
+                current_layer_idx = extract_layers_number(name)
+                module_base_name = name.split('.')[-1]
+
+                if module_base_name in head_prune_targets:
+                    for layer_idx_prune, head_idx_prune in model.config.layer_head_pruned:
+                        if layer_idx_prune == current_layer_idx:
+                            hook = self.create_pruning_hook(
+                                layer_idx_prune,
+                                head_idx_prune,
+                                num_heads,
+                                head_dim,
+                                module_base_name,
+                                name
+                            )
+                            handle = module.register_forward_hook(hook)
+                            hook_handles.append(handle)
+
+        return hook_handles

@@ -8,6 +8,7 @@ from fla.layers import (
     DeltaNet,
     GatedDeltaNet,
     GatedDeltaProduct,
+    GptOssSinkAttention,
     GatedLinearAttention,
     GatedSlotAttention,
     HGRN2Attention,
@@ -19,7 +20,7 @@ from fla.layers import (
     NativeSparseAttention,
     ReBasedLinearAttention,
     RWKV6Attention,
-    RWKV7Attention
+    RWKV7Attention,
 )
 from fla.models import (
     ABCForCausalLM,
@@ -34,6 +35,10 @@ from fla.models import (
     GatedDeltaProductModel,
     KDAForCausalLM,
     KDAModel,
+    GatedAttentionTransformerForCausalLM,
+    GatedAttentionTransformerModel,
+    GptOssSinkTransformerForCausalLM,
+    GptOssSinkTransformerModel,
     GLAForCausalLM,
     GLAModel,
     GSAForCausalLM,
@@ -54,7 +59,9 @@ from fla.models import (
     RWKV7ForCausalLM,
     RWKV7Model,
     TransformerForCausalLM,
-    TransformerModel
+    TransformerModel,
+    TransformerWithPruningForCausalLM,
+    TransformerWithPruningModel
 )
 
 __all__ = [
@@ -65,6 +72,7 @@ __all__ = [
     'DeltaNet',
     'GatedDeltaNet',
     'GatedDeltaProduct',
+    'GptOssSinkAttention',
     'GatedLinearAttention',
     'GatedSlotAttention',
     'HGRNAttention',
@@ -89,6 +97,10 @@ __all__ = [
     'GatedDeltaProductModel',
     'KDAForCausalLM',
     'KDAModel',
+    'GatedAttentionTransformerForCausalLM',
+    'GatedAttentionTransformerModel',
+    'GptOssSinkTransformerForCausalLM',
+    'GptOssSinkTransformerModel',
     'GLAForCausalLM',
     'GLAModel',
     'GSAForCausalLM',
@@ -111,6 +123,8 @@ __all__ = [
     'RWKV7Model',
     'TransformerForCausalLM',
     'TransformerModel',
+    'TransformerWithPruningForCausalLM',
+    'TransformerWithPruningModel',
 ]
 
 __version__ = '0.1.2'

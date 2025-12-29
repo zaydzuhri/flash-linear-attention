@@ -5,9 +5,9 @@ from typing import Optional
 from transformers.configuration_utils import PretrainedConfig
 
 
-class TransformerConfig(PretrainedConfig):
+class StochasticSoftpickTransformerConfig(PretrainedConfig):
 
-    model_type = 'transformer'
+    model_type = 'stochastic_softpick_transformer'
     keys_to_ignore_at_inference = ['past_key_values']
 
     def __init__(
@@ -37,7 +37,7 @@ class TransformerConfig(PretrainedConfig):
         fuse_cross_entropy: bool = True,
         vocab_size: int = 32000,
         attn_impl: str = "flash_attn", # {flash_attn, parallel_attn, parallel_rectified_attn}, parallel_attn and parallel_rectified_attn are the fla.ops implementations which don't support inference
-        elementwise_gate: bool = False,
+        stochastic_p: float = 0.5,
         **kwargs,
     ):
         self.hidden_size = hidden_size
@@ -65,7 +65,7 @@ class TransformerConfig(PretrainedConfig):
         self.vocab_size = vocab_size
 
         self.attn_impl = attn_impl
-        self.elementwise_gate = elementwise_gate
+        self.stochastic_p = stochastic_p
 
         super().__init__(
             pad_token_id=pad_token_id,

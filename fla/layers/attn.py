@@ -6,6 +6,7 @@ from __future__ import annotations
 import warnings
 from typing import TYPE_CHECKING, Optional, Tuple
 
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -14,6 +15,24 @@ from einops import rearrange
 from transformers.utils import logging
 
 from fla.modules import RMSNorm, RotaryEmbedding
+from fla.ops import (
+    parallel_attn,
+    parallel_rectified_attn,
+    parallel_softpick_attn,
+    parallel_relu_softpick_1_attn,
+    parallel_relu_softpick_2_attn,
+    parallel_abs_softmax_1_attn,
+    parallel_abs_softmax_2_attn,
+    parallel_softmax_plus_one_attn,
+    naive_attn,
+    naive_rectified_attn,
+    naive_softpick_attn,
+    naive_relu_softpick_1_attn,
+    naive_relu_softpick_2_attn,
+    naive_abs_softmax_1_attn,
+    naive_abs_softmax_2_attn,
+    naive_softmax_plus_one_attn,
+)
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
@@ -28,12 +47,16 @@ except ImportError:
         category=ImportWarning
     )
     flash_attn_func = None
+    flash_attn_varlen_func = None
 
-import os
 if os.getenv("FLASH_ATTENTION_DISABLE", "0") == "1":
     flash_attn_func = None
+    flash_attn_varlen_func = None
 
+log_level = os.getenv("LOGLEVEL", "WARNING").upper()
+logging.logging.basicConfig(level=log_level)
 logger = logging.get_logger(__name__)
+
 
 
 class Attention(nn.Module):
@@ -48,7 +71,8 @@ class Attention(nn.Module):
         window_size: Optional[int] = None,
         rope_theta: Optional[float] = 10000.,
         max_position_embeddings: Optional[int] = None,
-        layer_idx: int = None
+        layer_idx: int = None,
+        attn_impl: str = "flash_attn",
     ):
         super().__init__()
 
@@ -68,17 +92,27 @@ class Attention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
         self.layer_idx = layer_idx
+        self.attn_impl = attn_impl
 
         self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=self.qkv_bias)
         self.k_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
         self.v_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
 
+        if "scaled" in self.attn_impl:
+            self.s = nn.Parameter(torch.empty(self.num_heads, 1))
+            self.register_buffer("logn", torch.log(torch.arange(2, self.max_position_embeddings*4+2, dtype=self.s.dtype)[:, None, None]))
+
         if qk_norm:
             self.q_norm = RMSNorm(self.head_dim)
             self.k_norm = RMSNorm(self.head_dim)
 
         self.rotary = RotaryEmbedding(dim=self.head_dim, base=self.rope_theta)
+
+    def reset_parameters(self):
+        if "scaled" in self.attn_impl:
+            nn.init.constant_(self.s, 0.3)
+            self.logn.copy_(torch.log(torch.arange(2, self.max_position_embeddings*4+2, dtype=self.s.dtype)[:, None, None]))
 
     def forward(
         self,
@@ -137,76 +171,117 @@ class Attention(nn.Module):
                 k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
                 v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
 
-        # Contains at least one padding token in the sequence
-        if attention_mask is not None:
-            if flash_attn_func is not None:
-                q, k, v, indices_q, cu_seq_lens, max_seq_lens = self._upad_input(q, k, v, attention_mask, q_len)
-                cu_seqlens_q, cu_seqlens_k = cu_seq_lens
-                max_seqlen_q, max_seqlen_k = max_seq_lens
-                o = flash_attn_varlen_func(
-                    q, k, v,
-                    cu_seqlens_q=cu_seqlens_q,
-                    cu_seqlens_k=cu_seqlens_k,
-                    max_seqlen_q=max_seqlen_q,
-                    max_seqlen_k=max_seqlen_k,
-                    causal=True,
-                    window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
-                ) # B S H D
-                o = pad_input(o, indices_q, batch_size, q_len) # B S H D
+        if "scaled" in self.attn_impl:
+            k_len = k.shape[1]
+            q = q * self.s.to(q.dtype) * self.logn[k_len - q_len:k_len].to(q.dtype)
+
+        if self.attn_impl == "flash_attn":
+            if attention_mask is not None:
+                if flash_attn_varlen_func is not None:
+                    q, k, v, indices_q, cu_seq_lens, max_seq_lens = self._upad_input(q, k, v, attention_mask, q_len)
+                    cu_seqlens_q, cu_seqlens_k = cu_seq_lens
+                    max_seqlen_q, max_seqlen_k = max_seq_lens
+                    o = flash_attn_varlen_func(
+                        q, k, v,
+                        cu_seqlens_q=cu_seqlens_q,
+                        cu_seqlens_k=cu_seqlens_k,
+                        max_seqlen_q=max_seqlen_q,
+                        max_seqlen_k=max_seqlen_k,
+                        causal=True,
+                        window_size=(-1, -1) if self.window_size is None else (self.window_size - 1, 0)
+                    )
+                    o = pad_input(o, indices_q, batch_size, q_len)
+                else:
+                    attention_mask = attention_mask.bool()
+                    q = rearrange(q, 'b s h d -> b h s d')
+                    k = rearrange(k, 'b s h d -> b h s d')
+                    v = rearrange(v, 'b s h d -> b h s d')
+                    o = F.scaled_dot_product_attention(
+                        q, k, v,
+                        attn_mask=attention_mask,
+                        dropout_p=0.0,
+                        is_causal=False,
+                    )
+                    o = rearrange(o, 'b h s d -> b s h d')
+            elif cu_seqlens is not None:
+                if flash_attn_varlen_func is not None:
+                    o = flash_attn_varlen_func(
+                        q.squeeze(0), k.squeeze(0), v.squeeze(0),
+                        cu_seqlens_q=cu_seqlens,
+                        cu_seqlens_k=cu_seqlens,
+                        max_seqlen_q=max_seqlen,
+                        max_seqlen_k=max_seqlen,
+                        causal=True,
+                        window_size=(-1, -1) if self.window_size is None else (self.window_size - 1, 0)
+                    ).unsqueeze(0)
+                else:
+                    raise NotImplementedError(
+                        "SDPA does not support variable length inputs with cu_seqlens. "
+                        "Please use flash_attn_func for variable length inputs."
+                    )
             else:
-                attention_mask = attention_mask.bool()
-                q = rearrange(q, 'b s h d -> b h s d')  # B H S D
-                k = rearrange(k, 'b s h d -> b h s d')  # B H S D
-                v = rearrange(v, 'b s h d -> b h s d')  # B H S D
-                o = F.scaled_dot_product_attention(
-                    q, k, v,
-                    attn_mask=attention_mask,
-                    dropout_p=0.0,
-                    is_causal=False,
-                ) # B, H, S, D
-                o = rearrange(o, 'b h s d -> b s h d')
-        elif cu_seqlens is not None:
-            if flash_attn_func is not None:
-                o = flash_attn_varlen_func(
-                    q.squeeze(0), k.squeeze(0), v.squeeze(0),
-                    cu_seqlens_q=cu_seqlens,
-                    cu_seqlens_k=cu_seqlens,
-                    max_seqlen_q=max_seqlen,
-                    max_seqlen_k=max_seqlen,
-                    causal=True,
-                    window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
-                ).unsqueeze(0)
-            else:
-                # o = F.scaled_dot_product_attention(
-                #     q.squeeze(0), k.squeeze(0), v.squeeze(0),
-                #     dropout_p=0.0,
-                #     is_causal=True
-                # ).unsqueeze(0)
-                raise NotImplementedError(
-                    "SDPA does not support variable length inputs with cu_seqlens. "
-                    "Please use flash_attn_func for variable length inputs."
-                )
+                if flash_attn_func is not None:
+                    o = flash_attn_func(
+                        q, k, v,
+                        causal=True,
+                        window_size=(-1, -1) if self.window_size is None else (self.window_size - 1, 0)
+                    )
+                else:
+                    q = rearrange(q, 'b s h d -> b h s d')
+                    k = rearrange(k, 'b s h d -> b h s d')
+                    v = rearrange(v, 'b s h d -> b h s d')
+                    o = F.scaled_dot_product_attention(
+                        q, k, v,
+                        dropout_p=0.0,
+                        is_causal=True
+                    )
+                    o = rearrange(o, 'b h s d -> b s h d')
+        elif self.attn_impl == "parallel_attn":
+            o = parallel_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "parallel_scaled_attn":
+            o = parallel_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "parallel_rectified_attn":
+            o = parallel_rectified_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "parallel_softpick_attn":
+            o = parallel_softpick_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "parallel_scaled_softpick_attn":
+            o = parallel_softpick_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "parallel_relu_softpick_1_attn":
+            o = parallel_relu_softpick_1_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "parallel_relu_softpick_2_attn":
+            o = parallel_relu_softpick_2_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "parallel_abs_softmax_1_attn":
+            o = parallel_abs_softmax_1_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "parallel_abs_softmax_2_attn":
+            o = parallel_abs_softmax_2_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "parallel_softmax_plus_one_attn":
+            o = parallel_softmax_plus_one_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "naive_attn":
+            o, attentions = naive_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "naive_scaled_attn":
+            o, attentions = naive_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "naive_rectified_attn":
+            o, attentions = naive_rectified_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "naive_softpick_attn":
+            o, attentions = naive_softpick_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "naive_scaled_softpick_attn":
+            o, attentions = naive_softpick_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "naive_relu_softpick_1_attn":
+            o, attentions = naive_relu_softpick_1_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "naive_relu_softpick_2_attn":
+            o, attentions = naive_relu_softpick_2_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "naive_abs_softmax_1_attn":
+            o, attentions = naive_abs_softmax_1_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "naive_abs_softmax_2_attn":
+            o, attentions = naive_abs_softmax_2_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif self.attn_impl == "naive_softmax_plus_one_attn":
+            o, attentions = naive_softmax_plus_one_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
         else:
-            if flash_attn_func is not None:
-                o = flash_attn_func(
-                    q, k, v,
-                    causal=True,
-                    window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
-                )
-            else:
-                q = rearrange(q, 'b s h d -> b h s d')  # B H S D
-                k = rearrange(k, 'b s h d -> b h s d')  # B H S D
-                v = rearrange(v, 'b s h d -> b h s d')  # B H S D
-                o = F.scaled_dot_product_attention(
-                    q, k, v,
-                    dropout_p=0.0,
-                    is_causal=True
-                )
-                o = rearrange(o, 'b h s d -> b s h d')
+            raise ValueError(f"Unknown attention implementation: {self.attn_impl}")
         o = o.reshape(batch_size, q_len, -1)
         o = self.o_proj(o)
 
-        if not output_attentions:
+        if not output_attentions or "parallel" in self.attn_impl or "flash" in self.attn_impl:
             attentions = None
 
         return o, attentions, past_key_values
@@ -236,5 +311,352 @@ class Attention(nn.Module):
             # The -q_len: slice assumes left padding.
             attention_mask = attention_mask[:, -q_len:]
             q, indices_q, cu_seqlens_q, max_seqlen_q, *_  = unpad_input(q, attention_mask)
+
+        return q, k, v, indices_q, (cu_seqlens_q, cu_seqlens_k), (max_seqlen_q, max_seqlen_k)
+
+class StochasticSoftpickAttention(nn.Module):
+
+    def __init__(
+        self,
+        hidden_size: int = 2048,
+        num_heads: int = 32,
+        num_kv_heads: Optional[int] = None,
+        qkv_bias: bool = False,
+        qk_norm: bool = False,
+        window_size: Optional[int] = None,
+        rope_theta: Optional[float] = 10000.,
+        max_position_embeddings: Optional[int] = None,
+        layer_idx: int = None,
+        attn_impl: str = "flash_attn",
+        stochastic_p: float = 0.5,
+        softpick_impl: Optional[str] = None,
+    ):
+        super().__init__()
+
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        if num_kv_heads is None:
+            self.num_kv_heads = self.num_heads
+        else:
+            self.num_kv_heads = num_kv_heads
+        self.num_kv_groups = num_heads // self.num_kv_heads
+        self.head_dim = self.hidden_size // self.num_heads
+        self.kv_dim = self.num_kv_heads * self.head_dim
+        self.qkv_bias = qkv_bias
+        self.qk_norm = qk_norm
+
+        self.window_size = window_size
+        self.rope_theta = rope_theta
+        self.max_position_embeddings = max_position_embeddings
+        self.layer_idx = layer_idx
+        self._softpick_manual = softpick_impl is not None
+        inferred_softpick = self._infer_softpick_attn_impl(attn_impl) if softpick_impl is None else softpick_impl
+        self._softpick_attn_impl = inferred_softpick
+        self._attn_impl = self._infer_softmax_from_softpick(attn_impl) if softpick_impl is None else attn_impl
+        self.stochastic_value = 0.0
+        self.set_stochastic_value(stochastic_p)
+        self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=self.qkv_bias)
+        self.k_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
+        self.v_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
+        self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
+
+        if self._uses_scaled_attention:
+            self.s = nn.Parameter(torch.empty(self.num_heads, 1))
+            self.register_buffer("logn", torch.log(torch.arange(2, self.max_position_embeddings*4+2, dtype=self.s.dtype)[:, None, None]))
+
+        if qk_norm:
+            self.q_norm = RMSNorm(self.head_dim)
+            self.k_norm = RMSNorm(self.head_dim)
+
+        self.rotary = RotaryEmbedding(dim=self.head_dim, base=self.rope_theta)
+
+    @property
+    def attn_impl(self) -> str:
+        return self._attn_impl
+
+    @attn_impl.setter
+    def attn_impl(self, value: str) -> None:
+        if not self._softpick_manual:
+            self._softpick_attn_impl = self._infer_softpick_attn_impl(value)
+            self._attn_impl = self._infer_softmax_from_softpick(value)
+        else:
+            self._attn_impl = value
+
+    @property
+    def softpick_attn_impl(self) -> str:
+        return self._softpick_attn_impl
+
+    @softpick_attn_impl.setter
+    def softpick_attn_impl(self, value: str) -> None:
+        self._softpick_attn_impl = value
+        self._softpick_manual = True
+
+    @property
+    def _uses_scaled_attention(self) -> bool:
+        return any(
+            "scaled" in impl for impl in (self.attn_impl, self.softpick_attn_impl) if impl is not None
+        )
+
+    def set_stochastic_value(self, value: float) -> None:
+        self.stochastic_value = float(min(1.0, max(0.0, value)))
+
+    def _infer_softpick_attn_impl(self, attn_impl: str) -> str:
+        mapping = {
+            "parallel_attn": "parallel_softpick_attn",
+            "parallel_scaled_attn": "parallel_scaled_softpick_attn",
+            "naive_attn": "naive_softpick_attn",
+            "naive_scaled_attn": "naive_scaled_softpick_attn",
+        }
+        if attn_impl in mapping:
+            return mapping[attn_impl]
+        if "softpick" in attn_impl:
+            return attn_impl
+        if attn_impl.endswith("_attn"):
+            return attn_impl.replace("_attn", "_softpick_attn")
+        return attn_impl
+
+    def _infer_softmax_from_softpick(self, attn_impl: str) -> str:
+        inverse_mapping = {
+            "parallel_softpick_attn": "parallel_attn",
+            "parallel_scaled_softpick_attn": "parallel_scaled_attn",
+            "parallel_relu_softpick_1_attn": "parallel_attn",
+            "parallel_relu_softpick_2_attn": "parallel_attn",
+            "parallel_abs_softmax_1_attn": "parallel_attn",
+            "parallel_abs_softmax_2_attn": "parallel_attn",
+            "naive_softpick_attn": "naive_attn",
+            "naive_scaled_softpick_attn": "naive_scaled_attn",
+            "naive_relu_softpick_1_attn": "naive_attn",
+            "naive_relu_softpick_2_attn": "naive_attn",
+            "naive_abs_softmax_1_attn": "naive_attn",
+            "naive_abs_softmax_2_attn": "naive_attn",
+        }
+        if attn_impl in inverse_mapping:
+            return inverse_mapping[attn_impl]
+        if "softpick" in attn_impl and attn_impl.endswith("_attn"):
+            return attn_impl.replace("_softpick", "")
+        return attn_impl
+
+    def _sample_use_softpick(self, device: torch.device) -> bool:
+        if self.stochastic_value <= 0:
+            logger.debug("USE SOFTMAX")
+            return False
+        if self.stochastic_value >= 1:
+            logger.debug("USE SOFTPICK")
+            return True
+        p = torch.rand((), device=device)
+        use_softpick = bool(p < self.stochastic_value)
+        if use_softpick:
+            logger.debug(f"USE SOFTPICK with {p = }")
+        else:
+            logger.debug(f"USE SOFTMAX with {p = }")
+        return use_softpick
+
+    def reset_parameters(self):
+        if self._uses_scaled_attention:
+            nn.init.constant_(self.s, 0.3)
+            self.logn.copy_(torch.log(torch.arange(2, self.max_position_embeddings*4+2, dtype=self.s.dtype)[:, None, None]))
+
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        if attention_mask is not None:
+            assert len(attention_mask.shape) == 2, (
+                "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
+                "for padding purposes (0 indicating padding). "
+                "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
+            )
+
+        batch_size, q_len, _ = hidden_states.size()
+
+        q, k, v = self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)
+
+        q = rearrange(q, '... (h d) -> ... h d', d=self.head_dim)
+        k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
+        v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
+
+        if self.qk_norm:
+            q, k = self.q_norm(q), self.k_norm(k)
+
+        # equivalent to cu_seqlens in `flash_attn`
+        cu_seqlens = kwargs.get('cu_seqlens', None)
+
+        seqlen_offset, max_seqlen = 0, q_len
+        if past_key_values is not None:
+            seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
+            max_seqlen = q.shape[1] + seqlen_offset
+
+            if attention_mask is not None:
+                # to deliminate the offsets of padding tokens
+                seqlen_offset = seqlen_offset + attention_mask.sum(-1) - attention_mask.shape[-1]
+                max_seqlen = q.shape[1] + max(seqlen_offset)
+
+        if self.max_position_embeddings is not None:
+            max_seqlen = max(max_seqlen, self.max_position_embeddings)
+        q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
+
+        if past_key_values is not None:
+            cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
+            k_cached, v_cached = past_key_values.update(
+                attn_state=(k.flatten(-2, -1), v.flatten(-2, -1)),
+                layer_idx=self.layer_idx,
+                offset=q_len,
+                cache_kwargs=dict(window_size=self.window_size)
+            )['attn_state']
+            if cache_has_content:
+                k, v = k_cached, v_cached
+                k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
+                v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
+
+        # if flash_attn_func is None:
+        #     raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")
+
+        attn_impl_to_use = self.softpick_attn_impl if self._sample_use_softpick(q.device) else self.attn_impl
+        if os.getenv("LOG_ATTENTION_MODE") == "1":
+            logger.info(
+                f"[StochasticSoftpickAttention] layer={self.layer_idx} "
+                f"mode={'softpick' if 'softpick' in attn_impl_to_use else 'softmax'} "
+                f"impl={attn_impl_to_use} p={self.stochastic_value:.3f}"
+            )
+
+        if "scaled" in attn_impl_to_use:
+            k_len = k.shape[1]
+            q = q * self.s.to(q.dtype) * self.logn[k_len-q_len:k_len].to(q.dtype)
+
+        o, attentions = self._apply_attention(
+            attn_impl_to_use,
+            q,
+            k,
+            v,
+            attention_mask,
+            cu_seqlens,
+            batch_size,
+            q_len,
+            max_seqlen,
+        )
+
+        o = o.reshape(batch_size, q_len, -1)
+        o = self.o_proj(o)
+
+        if not output_attentions or "parallel" in attn_impl_to_use or "flash" in attn_impl_to_use:
+            attentions = None
+
+        return o, attentions, past_key_values
+
+    def _apply_attention(
+        self,
+        attn_impl: str,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        cu_seqlens: Optional[torch.Tensor],
+        batch_size: int,
+        q_len: int,
+        max_seqlen: int,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        attentions = None
+        if attn_impl == "flash_attn":
+            if attention_mask is not None:
+                q, k, v, indices_q, cu_seq_lens, max_seq_lens = self._upad_input(q, k, v, attention_mask, q_len)
+                cu_seqlens_q, cu_seqlens_k = cu_seq_lens
+                max_seqlen_q, max_seqlen_k = max_seq_lens
+                o = flash_attn_varlen_func(
+                    q, k, v,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_k=max_seqlen_k,
+                    causal=True,
+                    window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
+                )
+                o = pad_input(o, indices_q, batch_size, q_len)
+            elif cu_seqlens is not None:
+                o = flash_attn_varlen_func(
+                    q.squeeze(0), k.squeeze(0), v.squeeze(0),
+                    cu_seqlens_q=cu_seqlens,
+                    cu_seqlens_k=cu_seqlens,
+                    max_seqlen_q=max_seqlen,
+                    max_seqlen_k=max_seqlen,
+                    causal=True,
+                    window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
+                ).unsqueeze(0)
+            else:
+                o = flash_attn_func(
+                    q, k, v,
+                    causal=True,
+                    window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
+                )
+        elif attn_impl == "parallel_attn":
+            o = parallel_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "parallel_scaled_attn":
+            o = parallel_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "parallel_rectified_attn":
+            o = parallel_rectified_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "parallel_softpick_attn":
+            o = parallel_softpick_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "parallel_scaled_softpick_attn":
+            o = parallel_softpick_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "parallel_relu_softpick_1_attn":
+            o = parallel_relu_softpick_1_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "parallel_relu_softpick_2_attn":
+            o = parallel_relu_softpick_2_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "parallel_abs_softmax_1_attn":
+            o = parallel_abs_softmax_1_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "parallel_abs_softmax_2_attn":
+            o = parallel_abs_softmax_2_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "naive_attn":
+            o, attentions = naive_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "naive_scaled_attn":
+            o, attentions = naive_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "naive_rectified_attn":
+            o, attentions = naive_rectified_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "naive_softpick_attn":
+            o, attentions = naive_softpick_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "naive_scaled_softpick_attn":
+            o, attentions = naive_softpick_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "naive_relu_softpick_1_attn":
+            o, attentions = naive_relu_softpick_1_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "naive_relu_softpick_2_attn":
+            o, attentions = naive_relu_softpick_2_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "naive_abs_softmax_1_attn":
+            o, attentions = naive_abs_softmax_1_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        elif attn_impl == "naive_abs_softmax_2_attn":
+            o, attentions = naive_abs_softmax_2_attn(q, k, v, scale=self.head_dim**-0.5, cu_seqlens=cu_seqlens)
+        else:
+            raise ValueError(f"Unknown attention implementation: {attn_impl}")
+        return o, attentions
+
+    def _upad_input(self, q, k, v, attention_mask, q_len):
+        batch_size, seq_len, num_key_value_heads, head_dim = k.shape
+        cache_mask = attention_mask[:, -seq_len:]
+        seqlens = cache_mask.sum(-1, dtype=torch.int32)
+        indices_k = torch.nonzero(cache_mask.flatten(), as_tuple=False).flatten()
+        max_seqlen_k = seqlens.max().item()
+        cu_seqlens_k = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
+
+        k = index_first_axis(k.reshape(batch_size * seq_len, num_key_value_heads, head_dim), indices_k)
+        v = index_first_axis(v.reshape(batch_size * seq_len, num_key_value_heads, head_dim), indices_k)
+        if q_len == seq_len:
+            q = index_first_axis(q.reshape(batch_size * seq_len, self.num_heads, head_dim), indices_k)
+            cu_seqlens_q = cu_seqlens_k
+            max_seqlen_q = max_seqlen_k
+            indices_q = indices_k
+        elif q_len == 1:
+            max_seqlen_q = 1
+            # There is a memcpy here, that is very bad.
+            cu_seqlens_q = torch.arange(batch_size + 1, dtype=torch.int32, device=q.device)
+            indices_q = cu_seqlens_q[:-1]
+            q = q.squeeze(1)
+        else:
+            # The -q_len: slice assumes left padding.
+            attention_mask = attention_mask[:, -q_len:]
+            q, indices_q, cu_seqlens_q, max_seqlen_q = unpad_input(q, attention_mask)
 
         return q, k, v, indices_q, (cu_seqlens_q, cu_seqlens_k), (max_seqlen_q, max_seqlen_k)
